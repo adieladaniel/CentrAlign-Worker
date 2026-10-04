@@ -1,0 +1,63 @@
+:root {
+  --bg: #f3f5f8; --card: #fff; --text: #1e293b; --muted: #64748b; --border: #d5dbe3;
+  --accent: #2456a6; --accent-dark: #1b4283; --ok: #166534; --ok-bg: #dcfce7; --err: #991b1b; --err-bg: #fee2e2;
+  --warn-bg: #fef3c7; --warn: #92400e;
+}
+body.app-mail { --accent: #0f766e; --accent-dark: #0b5a54; }
+body.app-portal { --accent: #7c3aed; --accent-dark: #5b21b6; }
+body.app-erp { --accent: #2456a6; --accent-dark: #1b4283; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); }
+.topbar { display: flex; align-items: center; gap: 24px; padding: 0 24px; height: 52px; background: var(--accent); color: #fff; }
+.topbar .brand { font-weight: 700; font-size: 17px; }
+.topbar nav { display: flex; gap: 6px; flex: 1; }
+.topbar a, .topbar .link-button { color: #fff; text-decoration: none; padding: 6px 12px; border-radius: 6px; }
+.topbar a:hover, .topbar .link-button:hover { background: rgba(255, 255, 255, .18); }
+main { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+h1 { font-size: 22px; margin: 0 0 16px; }
+h2 { font-size: 17px; margin: 24px 0 8px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+th { background: #eef1f6; font-size: 13px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+td.num, th.num { text-align: right; }
+tr.unread td { font-weight: 700; }
+a { color: var(--accent); }
+label { display: block; font-weight: 600; margin: 14px 0 4px; }
+input[type=text], input[type=email], input[type=password], input[type=search], select, textarea {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font: inherit; background: #fff; }
+input[aria-invalid=true], select[aria-invalid=true] { border-color: var(--err); background: #fff7f7; }
+textarea { min-height: 140px; }
+button, .button { display: inline-block; background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 8px 16px;
+  font: inherit; font-weight: 600; cursor: pointer; text-decoration: none; }
+button:hover, .button:hover { background: var(--accent-dark); }
+button.secondary, .button.secondary { background: #e2e8f0; color: var(--text); }
+button.danger { background: #b45309; }
+.link-button { background: none; padding: 6px 12px; }
+form.inline { display: inline; margin: 0; }
+.filters { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 16px; }
+.filters label { margin: 0 0 4px; }
+.filters > div { min-width: 220px; }
+.alert { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; border: 1px solid; }
+.alert ul { margin: 0; padding-left: 18px; }
+.alert-success { background: var(--ok-bg); color: var(--ok); border-color: #86efac; }
+.alert-error { background: var(--err-bg); color: var(--err); border-color: #fca5a5; }
+.alert-warning { background: var(--warn-bg); color: var(--warn); border-color: #fcd34d; }
+.pagination { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
+.pagination .current { font-weight: 700; padding: 6px 10px; }
+.pagination a { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; text-decoration: none; background: #fff; }
+dl.details { display: grid; grid-template-columns: 180px 1fr; gap: 8px 16px; margin: 0; }
+dl.details dt { color: var(--muted); }
+dl.details dd { margin: 0; font-weight: 600; }
+.msg-meta { color: var(--muted); margin-bottom: 12px; }
+.msg-body { white-space: pre-wrap; border-top: 1px solid var(--border); padding-top: 14px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: #e2e8f0; }
+.badge.paid, .badge.approved { background: var(--ok-bg); color: var(--ok); }
+.badge.open, .badge.pending { background: var(--warn-bg); color: var(--warn); }
+.login-card { max-width: 380px; margin: 60px auto; }
+.muted { color: var(--muted); }
+.actions { display: flex; gap: 10px; margin-top: 16px; }
+.landing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.landing-grid a.card { text-decoration: none; color: inherit; display: block; }
+.landing-grid a.card:hover { border-color: var(--accent); }
+.landing-grid h2 { margin-top: 0; color: var(--accent); }

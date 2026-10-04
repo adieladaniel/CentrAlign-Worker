@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CentrAlign Worker</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M9 16.5l5 5 9-11' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/ui/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <span class="brand-name">CentrAlign Worker</span>
+      <span class="brand-sub">autonomous task agent</span>
+    </div>
+    <div class="topbar-right">
+      <span id="run-pill" class="pill pill-idle" title="Status of the run being viewed">Idle</span>
+      <span id="model-badge" class="badge badge-model" title="LLM provider and model">connecting...</span>
+      <span class="sim-status" title="Simulated company environment (port 8001)">
+        <span id="sim-dot" class="dot dot-unknown"></span><span id="sim-label">environment</span>
+      </span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- LEFT: controls -->
+    <aside class="col col-left">
+      <section class="card">
+        <h2>New task</h2>
+        <textarea id="task" rows="5" placeholder="Describe a business task in plain language..." spellcheck="false"></textarea>
+        <div class="field-label">Examples</div>
+        <div id="presets" class="chips"></div>
+
+        <div class="row">
+          <label class="field">
+            <span class="field-label">Approvals</span>
+            <select id="approval-mode">
+              <option value="confirm_writes">Confirm writes</option>
+              <option value="confirm_all">Confirm everything</option>
+              <option value="auto">Auto (irreversible only)</option>
+            </select>
+          </label>
+          <label class="switch" title="Show the real browser window while the agent works">
+            <input type="checkbox" id="headed">
+            <span class="slider"></span>
+            <span class="switch-label">Headed browser</span>
+          </label>
+        </div>
+
+        <details class="env" open>
+          <summary>Environment &amp; chaos</summary>
+          <p class="hint">Chaos flags inject realistic failures into the simulated company to show recovery behavior.</p>
+          <div id="chaos" class="chaos-list"><span class="muted">Loading...</span></div>
+          <label class="check"><input type="checkbox" id="reset-before" checked> Reset environment before each run</label>
+          <button id="reset-btn" class="btn btn-ghost" type="button">Reset environment now</button>
+        </details>
+
+        <div class="actions">
+          <button id="run-btn" class="btn btn-primary" type="button">Run task</button>
+          <button id="cancel-btn" class="btn btn-danger-ghost" type="button" disabled>Cancel</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>Run history</h2><button id="history-refresh" class="link-btn" type="button">refresh</button></div>
+        <ul id="history" class="history"><li class="muted small">No runs yet.</li></ul>
+      </section>
+    </aside>
+
+    <!-- CENTER: timeline -->
+    <section class="col col-center">
+      <div class="center-head">
+        <h2>Live timeline</h2>
+        <span id="timeline-meta" class="muted small"></span>
+        <button id="autoscroll-btn" class="btn btn-small hidden" type="button">Autoscroll paused. Jump to latest</button>
+      </div>
+      <div id="scroller" class="scroller">
+        <div id="pending"></div>
+        <div id="timeline" class="timeline">
+          <div id="empty" class="empty">
+            <div class="empty-title">Ready when you are</div>
+            <p>Pick an example or describe a task, then press <b>Run task</b>. Every step the agent takes appears here live,
+            including the plan, the tools it uses, approvals it asks for, and an independent check of its own result.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT: state -->
+    <aside class="col col-right">
+      <section class="card">
+        <h2>Plan</h2>
+        <div id="goal" class="goal muted small"></div>
+        <ol id="plan" class="plan"><li class="muted small plain">The plan appears once the agent has one.</li></ol>
+        <details id="criteria-box" class="criteria hidden"><summary>Success criteria</summary><ul id="criteria"></ul></details>
+      </section>
+
+      <section class="card">
+        <h2>Working memory</h2>
+        <div id="memory" class="memory"><span class="muted small">Nothing remembered yet.</span></div>
+      </section>
+
+      <section class="card">
+        <h2>Stats</h2>
+        <dl id="stats" class="stats"></dl>
+      </section>
+    </aside>
+  </main>
+
+  <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true">
+    <button id="lightbox-close" class="lightbox-close" type="button" aria-label="Close">&times;</button>
+    <img id="lightbox-img" alt="">
+    <div id="lightbox-caption" class="lightbox-caption"></div>
+  </div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

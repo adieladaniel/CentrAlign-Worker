@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Bills - {{ app_title }}{% endblock %}
+{% block content %}
+<h1>AP bills</h1>
+<form method="get" action="/erp/bills" class="filters" role="search">
+  <div>
+    <label for="q">Search bills</label>
+    <input id="q" name="q" type="search" value="{{ q }}" placeholder="Vendor or invoice number">
+  </div>
+  <button type="submit">Search</button>
+  <a class="button" href="/erp/bills/new">New AP bill</a>
+</form>
+<table>
+  <thead><tr><th scope="col">Bill #</th><th scope="col">Vendor</th><th scope="col">Invoice #</th><th scope="col" class="num">Amount</th><th scope="col">Currency</th><th scope="col">Due date</th><th scope="col">Status</th></tr></thead>
+  <tbody>
+  {% for b in bills %}
+    <tr>
+      <td><a href="/erp/bills/{{ b.id }}">#{{ b.id }}</a></td>
+      <td>{{ b.vendor }}</td>
+      <td>{{ b.invoice_number }}</td>
+      <td class="num">{{ b.amount|money }}</td>
+      <td>{{ b.currency }}</td>
+      <td>{{ b.due_date }}</td>
+      <td><span class="badge {{ b.status }}">{{ b.status|capitalize }}</span></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="muted">No bills found.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

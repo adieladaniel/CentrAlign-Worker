@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ folder|capitalize }} - {{ app_title }}{% endblock %}
+{% block content %}
+<h1>{{ folder|capitalize }}</h1>
+{% if not messages %}<p class="muted">No messages in this folder.</p>{% else %}
+<table>
+  <thead><tr><th scope="col">{{ 'To' if folder == 'sent' else 'From' }}</th><th scope="col">Subject</th><th scope="col">Date</th><th scope="col">Attachment</th></tr></thead>
+  <tbody>
+  {% for m in messages %}
+    <tr class="{{ 'unread' if not m.is_read else '' }}">
+      <td>{{ m.recipient if folder == 'sent' else m.sender }}</td>
+      <td><a href="/mail/messages/{{ m.id }}">{{ m.subject }}</a></td>
+      <td>{{ m.sent_at|fmt_dt }}</td>
+      <td>{% if m.attachment_invoice %}PDF{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

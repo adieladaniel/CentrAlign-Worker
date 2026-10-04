@@ -1,0 +1,17 @@
+id: invoice_ambiguous_vendor
+title: Ambiguous vendor name (Ltd vs Holdings)
+task: "Find the latest invoice from Company X, extract the amount and due date, enter it into our internal system, and tell me once it is done."
+chaos: [ambiguous_vendor]
+approval: approve_all
+answers:
+  rules:
+    - keywords: ["company x", "which", "vendor", "ltd", "holdings"]
+      reply: "Company X Ltd"
+  default: "Company X Ltd"
+expect:
+  checker: invoice_ambiguous_vendor
+  params:
+    vendor: Company X Ltd
+    other_vendor: Company X Holdings
+    min_questions: 1
+tags: [invoice, ambiguity, clarification, chaos]

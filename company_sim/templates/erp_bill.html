@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Bill #{{ bill.id }} - {{ app_title }}{% endblock %}
+{% block content %}
+<h1>Bill #{{ bill.id }}</h1>
+<div class="card">
+  <dl class="details">
+    <dt>Vendor</dt><dd>{{ bill.vendor }} ({{ bill.vendor_code }})</dd>
+    <dt>Invoice number</dt><dd>{{ bill.invoice_number }}</dd>
+    <dt>Amount</dt><dd>{{ bill.amount|money }} {{ bill.currency }}</dd>
+    <dt>Issue date</dt><dd>{{ bill.issue_date }}</dd>
+    <dt>Due date</dt><dd>{{ bill.due_date }}</dd>
+    <dt>Status</dt><dd><span class="badge {{ bill.status }}">{{ bill.status|capitalize }}</span></dd>
+    <dt>Notes</dt><dd>{{ bill.notes or '-' }}</dd>
+    <dt>Created</dt><dd>{{ bill.created_at|fmt_dt }}</dd>
+  </dl>
+  <div class="actions">
+    {% if bill.status != 'approved' %}
+    <form method="post" action="/erp/bills/{{ bill.id }}/approve" class="inline">
+      <button type="submit" class="danger">Approve for payment</button>
+    </form>
+    {% endif %}
+    <a class="button secondary" href="/erp/bills">Back to bills</a>
+  </div>
+</div>
+{% endblock %}

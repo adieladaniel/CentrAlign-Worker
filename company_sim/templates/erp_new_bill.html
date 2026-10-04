@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}New AP bill - {{ app_title }}{% endblock %}
+{% block content %}
+<h1>New AP bill</h1>
+{% if errors %}
+<div role="alert" class="alert alert-error">
+  <ul>{% for field, message in errors %}<li>{{ message }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+<form method="post" action="/erp/bills/new" class="card" novalidate>
+  <label for="vendor">Vendor</label>
+  <select id="vendor" name="vendor" {% if 'vendor' in error_fields %}aria-invalid="true"{% endif %}>
+    <option value="">-- Select vendor --</option>
+    {% for v in vendors %}<option value="{{ v.erp_code }}" {{ 'selected' if values.vendor == v.erp_code else '' }}>{{ v.name }}</option>{% endfor %}
+  </select>
+
+  <label for="invoice_number">Invoice number</label>
+  <input id="invoice_number" name="invoice_number" type="text" value="{{ values.invoice_number or '' }}" {% if 'invoice_number' in error_fields %}aria-invalid="true"{% endif %}>
+
+  <label for="amount">Amount</label>
+  <input id="amount" name="amount" type="text" inputmode="decimal" value="{{ values.amount or '' }}" {% if 'amount' in error_fields %}aria-invalid="true"{% endif %}>
+
+  <label for="currency">Currency</label>
+  <select id="currency" name="currency" {% if 'currency' in error_fields %}aria-invalid="true"{% endif %}>
+    {% for c in currencies %}<option value="{{ c }}" {{ 'selected' if values.currency == c else '' }}>{{ c }}</option>{% endfor %}
+  </select>
+
+  <label for="issue_date">Issue date</label>
+  <input id="issue_date" name="issue_date" type="text" placeholder="YYYY-MM-DD" value="{{ values.issue_date or '' }}" {% if 'issue_date' in error_fields %}aria-invalid="true"{% endif %}>
+
+  <label for="due_date">Due date</label>
+  <input id="due_date" name="due_date" type="text" placeholder="YYYY-MM-DD" value="{{ values.due_date or '' }}" {% if 'due_date' in error_fields %}aria-invalid="true"{% endif %}>
+
+  <label for="notes">Notes</label>
+  <textarea id="notes" name="notes">{{ values.notes or '' }}</textarea>
+
+  <div class="actions"><button type="submit">Save bill</button><a class="button secondary" href="/erp/bills">Cancel</a></div>
+</form>
+{% endblock %}

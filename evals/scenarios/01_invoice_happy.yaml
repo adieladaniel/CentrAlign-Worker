@@ -1,0 +1,12 @@
+id: invoice_happy
+title: Latest invoice to ERP (happy path)
+task: "Find the latest invoice from Company X, extract the amount and due date, enter it into our internal system, and tell me once it is done."
+chaos: []
+approval: approve_all
+answers:
+  default: "Please use your best judgement and proceed."
+expect:
+  checker: invoice_entry
+  params:
+    vendor: Company X Ltd
+tags: [invoice, baseline]

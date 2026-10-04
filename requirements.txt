@@ -1,0 +1,17 @@
+google-genai
+httpx
+pydantic
+pydantic-settings
+python-dotenv
+jsonschema
+pypdf
+reportlab
+pytest
+pytest-asyncio
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+itsdangerous
+playwright
+pyyaml

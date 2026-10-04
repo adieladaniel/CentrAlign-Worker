@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}{{ msg.subject }} - {{ app_title }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>{{ msg.subject }}</h1>
+  <div class="msg-meta">
+    <div><strong>From:</strong> {{ msg.sender }}</div>
+    <div><strong>To:</strong> {{ msg.recipient }}</div>
+    <div><strong>Date:</strong> {{ msg.sent_at|fmt_dt }}</div>
+  </div>
+  <div class="msg-body">{{ msg.body }}</div>
+  {% if attachment %}
+  <h2>Attachments</h2>
+  <p><a href="/mail/messages/{{ msg.id }}/attachment" download>{{ attachment }}</a></p>
+  {% endif %}
+  <div class="actions">
+    {% if msg.folder == 'inbox' %}<a class="button" href="/mail/compose?reply_to={{ msg.id }}">Reply</a>{% endif %}
+    <a class="button secondary" href="/mail/{{ 'inbox' if msg.folder == 'inbox' else 'sent' }}">Back to {{ msg.folder }}</a>
+  </div>
+</div>
+{% endblock %}

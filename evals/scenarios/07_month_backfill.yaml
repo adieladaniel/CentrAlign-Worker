@@ -1,0 +1,11 @@
+id: month_backfill
+title: Record every open invoice due this month
+task: "Make sure every open vendor invoice due this month is recorded in our accounting system."
+chaos: []
+approval: approve_all
+answers:
+  default: "Please use your best judgement and proceed."
+expect:
+  checker: month_backfill
+  params: {}
+tags: [invoice, multi-item, generalization]

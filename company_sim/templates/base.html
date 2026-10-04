@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_title }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="app-{{ app_key }}">
+  <header class="topbar">
+    <div class="brand">{{ app_title }}</div>
+    <nav aria-label="Main navigation">
+      {% for label, href in nav %}<a href="{{ href }}">{{ label }}</a>{% endfor %}
+    </nav>
+    {% if signed_in %}
+    <form method="post" action="{{ logout_url }}" class="inline"><button type="submit" class="link-button">Sign out</button></form>
+    {% endif %}
+  </header>
+  <main>
+    {% for f in flashes %}
+    <div role="{{ 'alert' if f.kind == 'error' else 'status' }}" class="alert alert-{{ f.kind }}">{{ f.message }}</div>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

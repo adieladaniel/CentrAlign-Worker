@@ -1,0 +1,68 @@
+"""Application settings, loaded from environment variables and an optional ``.env`` file."""
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """All runtime configuration for the worker. Field names match the env var names (case-insensitive)."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # LLM
+    LLM_PROVIDER: Literal["gemini", "ollama", "fake"] = "gemini"
+    GEMINI_API_KEY: str = ""
+    # Fallback chain, tried in order; a model whose free-tier daily quota is gone is skipped for the day.
+    GEMINI_MODELS: str = "gemini-3.5-flash,gemini-3.6-flash,gemini-3.7-flash,gemini-2.5-flash,gemini-3.8-flash,gemini-3.5-flash-lite,gemini-2.5-flash-lite"
+    # Backward compatible single-model setting: when set, it is tried first, ahead of GEMINI_MODELS.
+    GEMINI_MODEL: str = ""
+    OLLAMA_MODEL: str = "qwen2.5:3b"
+    OLLAMA_URL: str = "http://localhost:11434"
+    LLM_MIN_INTERVAL_S: float = 4.0
+    # How long to keep retrying the model through a network outage (DNS/connection errors) before giving up.
+    LLM_NETWORK_RETRY_S: float = 300.0
+
+    # Environment
+    SIM_BASE_URL: str = "http://localhost:8001"
+    WORKSPACE_DIR: str = "./workspace"
+    RUNS_DIR: str = "./runs"
+    HEADLESS: bool = True
+
+    # Agent policy and guards
+    APPROVAL_MODE: Literal["auto", "confirm_writes", "confirm_all"] = "confirm_writes"
+    MAX_STEPS: int = 40
+    MAX_CONSECUTIVE_FAILURES: int = 4
+    RUN_TIMEOUT_S: int = 900
+
+    # Tools
+    HTTP_ALLOWED_HOSTS: str = "localhost,127.0.0.1"
+
+    @field_validator("GEMINI_API_KEY", mode="before")
+    @classmethod
+    def _strip_key(cls, v: object) -> object:
+        return v.strip() if isinstance(v, str) else v
+
+    @property
+    def gemini_models(self) -> list[str]:
+        """The Gemini fallback chain: GEMINI_MODEL (if set) first, then GEMINI_MODELS, without duplicates."""
+        names = [self.GEMINI_MODEL, *self.GEMINI_MODELS.split(",")]
+        chain: list[str] = []
+        for name in (n.strip() for n in names):
+            if name and name not in chain:
+                chain.append(name)
+        return chain
+
+    @property
+    def http_allowed_hosts(self) -> set[str]:
+        """HTTP_ALLOWED_HOSTS parsed into a lowercase set of hostnames."""
+        return {h.strip().lower() for h in self.HTTP_ALLOWED_HOSTS.split(",") if h.strip()}
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return the process-wide cached Settings instance."""
+    return Settings()

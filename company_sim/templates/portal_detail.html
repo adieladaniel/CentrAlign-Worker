@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Invoice {{ inv.number }} - {{ app_title }}{% endblock %}
+{% block content %}
+<h1>Invoice {{ inv.number }}</h1>
+<div class="card">
+  <dl class="details">
+    <dt>Vendor</dt><dd>{{ inv.vendor }}</dd>
+    <dt>Issue date</dt><dd>{{ inv.issue_date }}</dd>
+    <dt>Due date</dt><dd>{{ inv.due_date }}</dd>
+    <dt>Amount</dt><dd>{{ inv.amount|money }} {{ inv.currency }}</dd>
+    <dt>Status</dt><dd><span class="badge {{ inv.status }}">{{ inv.status|capitalize }}</span></dd>
+  </dl>
+  <h2>Line items</h2>
+  <table>
+    <thead><tr><th scope="col">Description</th><th scope="col" class="num">Qty</th><th scope="col" class="num">Unit price</th></tr></thead>
+    <tbody>
+    {% for it in items %}
+      <tr><td>{{ it.description }}</td><td class="num">{{ '%g' % it.quantity }}</td><td class="num">{{ it.unit_price|money }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="actions">
+    <a class="button" href="/portal/invoices/{{ inv.number }}/pdf" download>Download PDF</a>
+    <a class="button secondary" href="/portal/invoices">Back to invoices</a>
+  </div>
+</div>
+{% endblock %}

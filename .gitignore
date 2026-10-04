@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets and local config (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# Run output: logs, screenshots, downloads, events.jsonl, report.md
+runs/
+
+# Simulated company: generated on first start (SQLite db + invoice PDFs)
+company_sim/data/
+
+# Eval output: per-run JSON and logs are ignored. evals/results/latest.md is kept on purpose
+# so reviewers can read the last results table without running anything.
+evals/results/*
+!evals/results/latest.md
+!evals/results/.gitkeep
+
+# Test and tool caches
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Playwright artifacts
+test-results/
+playwright-report/
+.playwright/
+*.trace.zip
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

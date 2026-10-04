@@ -1,0 +1,13 @@
+id: reply_payment_date
+title: Reply to a vendor payment-date question
+task: "Initech emailed asking when invoice INI-20502 will be paid. Check our records and reply to them with the expected payment date (use the invoice due date)."
+chaos: []
+approval: approve_all
+answers:
+  default: "Please use your best judgement and proceed."
+expect:
+  checker: reply_payment_date
+  params:
+    invoice: INI-20502
+    vendor: Initech Supplies
+tags: [email, non-invoice-entry, generalization]

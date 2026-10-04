@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Invoices - {{ app_title }}{% endblock %}
+{% block content %}
+<h1>Invoices</h1>
+<form method="get" action="/portal/invoices" class="filters">
+  <div>
+    <label for="vendor">Vendor</label>
+    <select id="vendor" name="vendor">
+      <option value="">All vendors</option>
+      {% for v in vendors %}<option value="{{ v }}" {{ 'selected' if v == vendor else '' }}>{{ v }}</option>{% endfor %}
+    </select>
+  </div>
+  <button type="submit">Filter</button>
+</form>
+<table>
+  <thead><tr><th scope="col">Invoice #</th><th scope="col">Vendor</th><th scope="col">Issue date</th><th scope="col">Status</th></tr></thead>
+  <tbody>
+  {% for inv in invoices %}
+    <tr>
+      <td><a href="/portal/invoices/{{ inv.number }}">{{ inv.number }}</a></td>
+      <td>{{ inv.vendor }}</td>
+      <td>{{ inv.issue_date }}</td>
+      <td><span class="badge {{ inv.status }}">{{ inv.status|capitalize }}</span></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No invoices found.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<nav class="pagination" aria-label="Pagination">
+  {% set qv = '&vendor=' ~ (vendor|urlencode) if vendor else '' %}
+  {% if page > 1 %}<a href="/portal/invoices?page={{ page - 1 }}{{ qv }}" rel="prev">Previous</a>{% endif %}
+  <span class="current" aria-current="page">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="/portal/invoices?page={{ page + 1 }}{{ qv }}" rel="next">Next</a>{% endif %}
+  <span class="muted">({{ total }} invoices)</span>
+</nav>
+{% endblock %}

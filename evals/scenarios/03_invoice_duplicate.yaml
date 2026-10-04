@@ -1,0 +1,13 @@
+id: invoice_duplicate
+title: Invoice that is already in the ERP
+task: "Find the latest invoice from Company X, extract the amount and due date, enter it into our internal system, and tell me once it is done."
+chaos: [duplicate_bill]
+approval: approve_all
+answers:
+  default: "Please use your best judgement and proceed."
+expect:
+  checker: invoice_duplicate
+  params:
+    vendor: Company X Ltd
+    accepted_statuses: [succeeded, needs_attention]
+tags: [invoice, duplicate, chaos]
