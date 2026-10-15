@@ -42,7 +42,7 @@ class ToolContext:
     settings: Settings
     memory: Any = None  # set by the agent runtime
     emit: Callable[[str, dict], Awaitable[None]] | None = None  # event callback
-    extras: dict = field(default_factory=dict)  # shared resources, e.g. browser session
+    extras: dict = field(default_factory=dict)  # per-run resources, e.g. the browser session
 
 
 class Tool(ABC):
@@ -55,11 +55,14 @@ class Tool(ABC):
     read_only_safe: ClassVar[bool] = True  # may be given to the verifier
     max_retries: ClassVar[int] = 2  # auto-retries for transient failures
 
-    def classify(self, args: dict) -> Risk:
-        """Risk of this specific call; override when it depends on the arguments."""
+    def classify(self, args: dict, ctx: ToolContext) -> Risk:
+        """Risk of this specific call; override when it depends on the arguments or on the run's own state.
+
+        ``ctx`` is the calling run's context. Tool instances are shared and stateless: anything a classification
+        needs beyond ``args`` (e.g. the page the browser is on) must be read from ``ctx``, never from the tool."""
         return self.risk
 
-    def retry_safe(self, args: dict) -> bool:
+    def retry_safe(self, args: dict, ctx: ToolContext) -> bool:
         """May this specific call be re-run automatically after a transient failure? Override to return False
         for state-changing calls, where a failure may have happened after a partial write."""
         return True
@@ -68,8 +71,9 @@ class Tool(ABC):
         """Guidance appended to a transient failure of a call that ``retry_safe`` ruled out."""
         return "[Not retried automatically: the action may or may not have taken effect. Verify before repeating it.]"
 
-    def describe_action(self, args: dict) -> str:
-        """One-line human-readable description for approval cards and the timeline."""
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
+        """One-line human-readable description for approval cards and the timeline. ``ctx`` (the calling run's
+        context) lets a tool enrich the text with run state; it may be None for a purely static description."""
         shown = ", ".join(f"{k}={_short(v)}" for k, v in args.items())
         return f"{self.name}({shown})"
 

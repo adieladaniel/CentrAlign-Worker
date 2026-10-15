@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 
 def build_registry(settings: Settings) -> ToolRegistry:
-    """Files, HTTP, memory, control and interaction tools, plus browser tools when Playwright support is present."""
+    """Files, HTTP, memory, control and interaction tools, plus browser and secret-safe tools when Playwright is present."""
     registry = ToolRegistry()
     for tool in (
         ListFilesTool(), ReadFileTool(), WriteFileTool(), HttpRequestTool(),
@@ -24,8 +24,10 @@ def build_registry(settings: Settings) -> ToolRegistry:
         registry.register(tool)
     try:
         from worker.tools.browser import register_browser_tools
+        from worker.tools.secrets import register_secret_tools
     except ImportError as err:
         log.warning("Browser tools unavailable: %s", err)
     else:
         register_browser_tools(registry)
+        register_secret_tools(registry)  # list_credentials, browser_fill_secret (inert without vault credentials)
     return registry

@@ -4,9 +4,10 @@ Site-agnostic: every action returns a compact text snapshot of the page (see ``s
 visible interactive elements are numbered (``[7] button "Save bill"``). The agent refers to elements by
 those numbers. Refs are re-assigned on every snapshot, so a stale ref produces a clear error.
 
-One ``BrowserSession`` (Chromium + context + page) lives per run in ``ctx.extras["browser"]``; all browser
-tools of a registry share a ``BrowserHub`` so that the synchronous ``classify`` / ``describe_action`` hooks
-can look up the element behind a ref from the most recent snapshot.
+One ``BrowserSession`` (an isolated browser context + active page, taken from the shared ``BrowserPool``) lives
+per run in ``ctx.extras["browser"]``. The tool instances themselves are stateless and can be shared by any number
+of concurrent runs: ``classify`` / ``describe_action`` receive the calling run's ``ToolContext`` and look up the
+element behind a ref in *that run's* session.
 """
 from __future__ import annotations
 
@@ -19,9 +20,9 @@ from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from playwright.async_api import async_playwright
 
 from worker.tools.base import Risk, Tool, ToolContext, ToolResult
+from worker.tools.browser_pool import POOL_KEY, BrowserPool, BrowserPoolError, get_pool
 from worker.tools.registry import ToolRegistry
 from worker.tools.snapshot import (
     DEFAULT_MAX_ELEMENTS,
@@ -31,7 +32,6 @@ from worker.tools.snapshot import (
     format_snapshot,
 )
 
-HEADED_SLOW_MO_MS = 150
 ACTION_TIMEOUT_MS = 5000
 NAV_TIMEOUT_MS = 20000
 DOWNLOAD_WAIT_S = 10.0
@@ -131,23 +131,25 @@ def _safe_name(raw: str, default: str = "download") -> str:
 
 
 class BrowserSession:
-    """One Chromium instance, context and active page for a run."""
+    """One run's isolated browser context (taken from a ``BrowserPool``) and its active page.
+
+    Also holds the run's element-ref cache from the latest snapshot, which the stateless tools read to classify
+    and describe actions."""
 
     def __init__(
         self,
         ctx: ToolContext,
-        hub: BrowserHub | None = None,
+        pool: BrowserPool | None = None,
         *,
         max_text: int = DEFAULT_MAX_TEXT,
         max_elements: int = DEFAULT_MAX_ELEMENTS,
     ) -> None:
         self.ctx = ctx
-        self.hub = hub
+        self._pool = pool
         self.max_text = max_text
         self.max_elements = max_elements
-        self._pw: Any = None
-        self._browser: Any = None
         self._context: Any = None
+        self._context_closed = False
         self._page: Any = None
         self._notes: list[str] = []
         self._step = 0
@@ -167,8 +169,18 @@ class BrowserSession:
 
     # ---- lifecycle
     @property
+    def pool(self) -> BrowserPool:
+        """The injected pool (``ctx.extras['browser_pool']`` or the constructor argument), else the process default."""
+        return self._pool or self.ctx.extras.get(POOL_KEY) or get_pool(self.ctx.settings)
+
+    @property
     def started(self) -> bool:
-        return self._browser is not None and self._browser.is_connected()
+        """Is there a live context (its context open and the Chromium behind it still connected)?"""
+        context = self._context
+        if context is None or self._context_closed:
+            return False
+        browser = context.browser
+        return browser is None or browser.is_connected()
 
     @property
     def downloads_dir(self) -> Path:
@@ -184,52 +196,57 @@ class BrowserSession:
         return self._page
 
     async def start(self) -> None:
-        """Launch Chromium if needed (idempotent)."""
-        if self.started and self._context is not None:
+        """Get a browser context from the pool if there is none (idempotent). After a crash or reset the new
+        context is empty and the agent is told the previous page is gone."""
+        if self.started:
             if not any(not p.is_closed() for p in self._context.pages):
                 await self._context.new_page()
             return
         await self._teardown()
-        headless = bool(self.ctx.settings.HEADLESS)
-        self._pw = await async_playwright().start()
         try:
-            self._browser = await self._pw.chromium.launch(headless=headless, slow_mo=0 if headless else HEADED_SLOW_MO_MS)
-        except PlaywrightError as exc:
+            self._context = await self.pool.acquire_context(headless=bool(self.ctx.settings.HEADLESS))
+        except BrowserPoolError as exc:
+            raise BrowserToolError(str(exc)) from exc
+        try:
+            self._context_closed = False
+            self._context.set_default_timeout(ACTION_TIMEOUT_MS)
+            self._context.set_default_navigation_timeout(NAV_TIMEOUT_MS)
+            self._context.on("page", self._on_page)
+            self._context.on("close", self._on_context_closed)
+            await self._apply_init_cookies()
+            await self._context.new_page()
+        except BaseException:
             await self._teardown()
-            if "Executable doesn't exist" in str(exc):
-                raise BrowserToolError("Chromium is not installed. Run: python -m playwright install chromium") from exc
             raise
-        self._context = await self._browser.new_context(
-            accept_downloads=True, viewport={"width": 1280, "height": 800}
-        )
-        self._context.set_default_timeout(ACTION_TIMEOUT_MS)
-        self._context.set_default_navigation_timeout(NAV_TIMEOUT_MS)
-        self._context.on("page", self._on_page)
-        await self._context.new_page()
         self.refs, self.focus, self.url = {}, None, ""
         if self._launched_before:
             self._notes.append("The browser was restarted; the previous page and its state are gone. Navigate again.")
         self._launched_before = True
 
+    async def _apply_init_cookies(self) -> None:
+        """Add the cookies in ``ctx.extras["browser_init_cookies"]`` (Playwright cookie dicts, each with ``url`` or
+        ``domain``) to the fresh context, before any page exists. The platform uses this to pin a run to its
+        organization's simulated company; it also applies again after a browser restart."""
+        cookies = self.ctx.extras.get("browser_init_cookies")
+        if cookies:
+            await self._context.add_cookies([dict(c) for c in cookies])
+
     async def _teardown(self) -> None:
-        for closer in (
-            getattr(self._context, "close", None),
-            getattr(self._browser, "close", None),
-            getattr(self._pw, "stop", None),
-        ):
-            if closer is not None:
-                try:
-                    await closer()
-                except Exception:  # noqa: BLE001 - best effort cleanup
-                    pass
-        self._pw = self._browser = self._context = self._page = None
+        """Give this run's context back to the pool (closes only that context, never the browser)."""
+        context, self._context, self._page = self._context, None, None
+        if context is not None:
+            await self.pool.release(context)
+
+    def _on_context_closed(self, context: Any) -> None:
+        if context is self._context:
+            self._context_closed = True
 
     async def close(self) -> None:
-        """Close the browser and release Playwright."""
+        """Release the run's browser context."""
         await self._teardown()
 
     async def reset(self) -> None:
-        """Drop a broken browser so the next ``start`` relaunches it."""
+        """Drop a broken context so the next ``start`` takes a fresh one (the pool relaunches Chromium if it died)."""
         await self._teardown()
 
     # ---- page event handlers
@@ -359,8 +376,6 @@ class BrowserSession:
         self.url = data["url"]
         self.refs = {e["ref"]: e for e in data["elements"]}
         self.focus = data.get("focus")
-        if self.hub is not None:
-            self.hub.latest = self
 
     def drain_notes(self) -> list[str]:
         """Notes produced since the last observation (dialogs, new tabs, downloads)."""
@@ -432,16 +447,24 @@ class BrowserSession:
         return [{"label": str(r.get("label") or ""), "value": str(r.get("value") or "")} for r in rows or []]
 
     # ---- risk
+    @property
+    def page_path(self) -> str:
+        """Path (and query) of the page in the latest snapshot, for human-readable action descriptions."""
+        parsed = urlparse(self.url)
+        return (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "") if self.url else "the current page"
+
     def classify_click(self, ref: Any) -> Risk:
+        """Risk of clicking ``ref``. An element missing from this session's cache can't be shown harmless, so it
+        is WRITE: unknown never downgrades to READ."""
         info = self.info(ref)
         if info is None:
-            return Risk.READ
+            return Risk.WRITE
         return classify_element(info.get("name", ""), info.get("role", ""), submit=bool(info.get("submit")))
 
     def classify_enter_on(self, info: dict | None) -> Risk:
-        """Risk of pressing Enter while ``info`` has focus."""
+        """Risk of pressing Enter while ``info`` has focus; ``None`` (focused element unknown) is WRITE."""
         if info is None:
-            return Risk.READ
+            return Risk.WRITE
         if info.get("tag") == "textarea":
             return Risk.READ
         if info.get("role") in ("button", "link"):
@@ -449,9 +472,13 @@ class BrowserSession:
         return _max_risk(*(classify_element(n, "button", submit=True) for n in info.get("formSubmits") or []))
 
     def classify_press(self, key: str) -> Risk:
+        """Risk of pressing ``key``. Only Enter/Space can activate something. With nothing focused they do
+        nothing; a focused element missing from the cache is unknown, hence WRITE."""
         if not _is_enter(key) and key.strip() != "Space":
             return Risk.READ
-        return self.classify_enter_on(self.refs.get(self.focus) if self.focus else None)
+        if not self.focus:
+            return Risk.READ
+        return self.classify_enter_on(self.refs.get(self.focus))
 
     # ---- evidence
     async def screenshot(self, label: str = "shot") -> str:
@@ -465,29 +492,22 @@ class BrowserSession:
         return rel
 
 
-class BrowserHub:
-    """Shared by all browser tools of a registry: finds/creates the run's session and exposes the latest one
-    to the synchronous ``classify`` / ``describe_action`` hooks."""
+def peek_session(ctx: ToolContext) -> BrowserSession | None:
+    """The run's browser session if it has one (never creates it)."""
+    return ctx.extras.get(SESSION_KEY)
 
-    def __init__(self) -> None:
-        self.latest: BrowserSession | None = None
 
-    def session_for(self, ctx: ToolContext) -> BrowserSession:
-        session = ctx.extras.get(SESSION_KEY)
-        if session is None:
-            session = BrowserSession(ctx, self)
-            ctx.extras[SESSION_KEY] = session
-        self.latest = session
-        return session
-
-    def page_path(self) -> str:
-        url = self.latest.url if self.latest else ""
-        parsed = urlparse(url)
-        return (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "") if url else "the current page"
+def session_for(ctx: ToolContext) -> BrowserSession:
+    """The run's browser session, created (not yet started) on first use."""
+    session = ctx.extras.get(SESSION_KEY)
+    if session is None:
+        session = BrowserSession(ctx)
+        ctx.extras[SESSION_KEY] = session
+    return session
 
 
 async def close_browser(ctx: ToolContext) -> None:
-    """Close the run's browser session, if any."""
+    """Close the run's browser session, if any (releases its context; the shared Chromium keeps running)."""
     session = ctx.extras.pop(SESSION_KEY, None)
     if session is not None:
         await session.close()
@@ -504,12 +524,12 @@ def _first_lines(message: str, n: int = 2, limit: int = 300) -> str:
 
 
 class BrowserTool(Tool):
-    """Base class: session lookup, read-only enforcement and Playwright error mapping."""
+    """Base class: session lookup, read-only enforcement and Playwright error mapping.
+
+    Instances hold no state, so one set of browser tools can serve any number of concurrent runs; everything
+    run-specific lives in the ``BrowserSession`` in ``ctx.extras``."""
 
     max_retries = 2
-
-    def __init__(self, hub: BrowserHub | None = None) -> None:
-        self.hub = hub or BrowserHub()
 
     # -- hooks for subclasses
     def refusal(self, args: dict, session: BrowserSession) -> str | None:
@@ -519,8 +539,8 @@ class BrowserTool(Tool):
         raise NotImplementedError
 
     # -- retry policy: only read-level actions are re-run automatically
-    def retry_safe(self, args: dict) -> bool:
-        return self.classify(args) == Risk.READ
+    def retry_safe(self, args: dict, ctx: ToolContext) -> bool:
+        return self.classify(args, ctx) == Risk.READ
 
     def no_retry_note(self, args: dict) -> str:
         return (
@@ -530,26 +550,33 @@ class BrowserTool(Tool):
 
     async def approval_preview(self, args: dict, ctx: ToolContext) -> list[dict[str, str]] | None:
         """For state-changing actions (submitting a form): the form's current field values."""
-        session = ctx.extras.get(SESSION_KEY)
-        if session is None or not session.started or self.classify(args) == Risk.READ:
+        session = peek_session(ctx)
+        if session is None or not session.started or self.classify(args, ctx) == Risk.READ:
             return None
         ref = args.get("ref") if args.get("ref") is not None else session.focus
-        return await session.form_values(ref) or None
+        rows = await session.form_values(ref)
+        redactor = ctx.extras.get("redactor")  # a field holding a vault secret (e.g. an API key in a text input)
+        if redactor:
+            rows = [{**row, "value": redactor.redact(row["value"])} for row in rows]
+        return rows or None
 
     # -- shared plumbing
-    def _latest(self) -> BrowserSession | None:
-        return self.hub.latest
-
-    def _element_desc(self, args: dict) -> str:
-        session = self._latest()
+    @staticmethod
+    def _element_desc(args: dict, ctx: ToolContext | None) -> str:
+        session = peek_session(ctx) if ctx else None
         info = session.info(args.get("ref")) if session else None
         if info is None:
             return f"element [{args.get('ref')}]"
         name = info.get("name") or ""
         return f'{info.get("role", "element")} "{name}"' if name else info.get("role", "element")
 
+    @staticmethod
+    def _page_path(ctx: ToolContext | None) -> str:
+        session = peek_session(ctx) if ctx else None
+        return session.page_path if session else "the current page"
+
     async def run(self, args: dict, ctx: ToolContext) -> ToolResult:
-        session = self.hub.session_for(ctx)
+        session = session_for(ctx)
         try:
             await session.start()
             if ctx.extras.get("read_only"):
@@ -627,7 +654,7 @@ class NavigateTool(BrowserTool):
         "required": ["url"],
     }
 
-    def describe_action(self, args: dict) -> str:
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
         return f"Navigate to {args.get('url')}"
 
     async def execute(self, args, ctx, session):
@@ -658,18 +685,21 @@ class ClickTool(BrowserTool):
     )
     parameters = {"type": "object", "properties": {"ref": _ref_schema()}, "required": ["ref"]}
     max_retries = 1
+    risk = Risk.WRITE  # fallback if classification itself fails: never assume a click is harmless
 
-    def classify(self, args: dict) -> Risk:
-        session = self._latest()
-        return session.classify_click(args.get("ref")) if session else Risk.READ
+    def classify(self, args: dict, ctx: ToolContext) -> Risk:
+        """Risk of clicking ``args['ref']`` according to *this run's* last snapshot. Without a session, or when the
+        ref is not in its cache, the element is unknown and the click is WRITE: unknown is never downgraded to READ."""
+        session = peek_session(ctx)
+        return session.classify_click(args.get("ref")) if session else Risk.WRITE
 
-    def describe_action(self, args: dict) -> str:
-        return f"Click {self._element_desc(args)} on {self.hub.page_path()}"
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
+        return f"Click {self._element_desc(args, ctx)} on {self._page_path(ctx)}"
 
     def refusal(self, args, session):
         risk = session.classify_click(args.get("ref"))
         if risk != Risk.READ:
-            return f"Clicking {self._element_desc(args)} is classified as {risk.value}."
+            return f"Clicking {self._element_desc(args, session.ctx)} is classified as {risk.value}."
         return None
 
     async def execute(self, args, ctx, session):
@@ -709,21 +739,26 @@ class TypeTool(BrowserTool):
     }
     read_only_safe = False
     max_retries = 1
+    risk = Risk.WRITE  # fallback if classification itself fails
 
-    def classify(self, args: dict) -> Risk:
-        session = self._latest()
-        if session is None or not args.get("submit"):
+    def classify(self, args: dict, ctx: ToolContext) -> Risk:
+        """Typing alone is READ; with ``submit`` (Enter) the risk is that of the form the field belongs to, per
+        this run's last snapshot. An unknown field (no session / not cached) with ``submit`` is WRITE."""
+        if not args.get("submit"):
             return Risk.READ
+        session = peek_session(ctx)
+        if session is None:
+            return Risk.WRITE
         return session.classify_enter_on(session.info(args.get("ref")))
 
-    def describe_action(self, args: dict) -> str:
-        session = self._latest()
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
+        session = peek_session(ctx) if ctx else None
         info = session.info(args.get("ref")) if session else None
         secret = bool(info and info.get("type") == "password")
         shown = "••••" if secret else str(args.get("text", ""))
         shown = shown if len(shown) <= 60 else shown[:57] + "..."
         tail = " and press Enter" if args.get("submit") else ""
-        return f'Type "{shown}" into {self._element_desc(args)} on {self.hub.page_path()}{tail}'
+        return f'Type "{shown}" into {self._element_desc(args, ctx)} on {self._page_path(ctx)}{tail}'
 
     def refusal(self, args, session):
         return "Typing is not allowed in read-only mode."
@@ -779,8 +814,8 @@ class SelectTool(BrowserTool):
     read_only_safe = False
     max_retries = 1
 
-    def describe_action(self, args: dict) -> str:
-        return f'Select "{args.get("option")}" in {self._element_desc(args)} on {self.hub.page_path()}'
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
+        return f'Select "{args.get("option")}" in {self._element_desc(args, ctx)} on {self._page_path(ctx)}'
 
     def refusal(self, args, session):
         return "Selecting options is not allowed in read-only mode."
@@ -828,18 +863,21 @@ class PressTool(BrowserTool):
         "required": ["key"],
     }
     read_only_safe = False
+    risk = Risk.WRITE  # fallback if classification itself fails
 
-    def classify(self, args: dict) -> Risk:
-        session = self._latest()
+    def classify(self, args: dict, ctx: ToolContext) -> Risk:
+        """Enter/Space is judged by the focused element in this run's last snapshot; other keys are READ. Without a
+        session nothing can be focused or submitted, so that is READ too."""
+        session = peek_session(ctx)
         return session.classify_press(str(args.get("key", ""))) if session else Risk.READ
 
-    def describe_action(self, args: dict) -> str:
-        session = self._latest()
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
+        session = peek_session(ctx) if ctx else None
         focused = session.info(session.focus) if session and session.focus else None
         where = ""
         if focused:
             where = f' on {focused.get("role")} "{focused.get("name", "")}"'
-        return f"Press {args.get('key')}{where} on {self.hub.page_path()}"
+        return f"Press {args.get('key')}{where} on {self._page_path(ctx)}"
 
     def refusal(self, args, session):
         risk = session.classify_press(str(args.get("key", "")))
@@ -862,8 +900,8 @@ class ScrollTool(BrowserTool):
         "properties": {"direction": {"type": "string", "enum": ["down", "up", "top", "bottom"]}},
     }
 
-    def describe_action(self, args: dict) -> str:
-        return f"Scroll {args.get('direction', 'down')} on {self.hub.page_path()}"
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
+        return f"Scroll {args.get('direction', 'down')} on {self._page_path(ctx)}"
 
     async def execute(self, args, ctx, session):
         direction = str(args.get("direction") or "down").lower()
@@ -893,7 +931,7 @@ class BackTool(BrowserTool):
     description = "Go back one page in the browser history."
     parameters = {"type": "object", "properties": {}}
 
-    def describe_action(self, args: dict) -> str:
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
         return "Go back in browser history"
 
     async def execute(self, args, ctx, session):
@@ -916,7 +954,7 @@ class ReadPageTool(BrowserTool):
         "properties": {"find": {"type": "string", "description": "Optional text to search for (case-insensitive)."}},
     }
 
-    def describe_action(self, args: dict) -> str:
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
         find = args.get("find")
         return f'Read page{f" searching for {find!r}" if find else ""}'
 
@@ -935,7 +973,7 @@ class ScreenshotTool(BrowserTool):
         "properties": {"label": {"type": "string", "description": "Short label for the file name, e.g. 'bill_saved'."}},
     }
 
-    def describe_action(self, args: dict) -> str:
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
         return f"Take screenshot '{args.get('label', 'shot')}'"
 
     async def execute(self, args, ctx, session):
@@ -953,8 +991,8 @@ class DownloadTool(BrowserTool):
     parameters = {"type": "object", "properties": {"ref": _ref_schema()}, "required": ["ref"]}
     max_retries = 1
 
-    def describe_action(self, args: dict) -> str:
-        return f"Download file via {self._element_desc(args)} on {self.hub.page_path()}"
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
+        return f"Download file via {self._element_desc(args, ctx)} on {self._page_path(ctx)}"
 
     async def execute(self, args, ctx, session):
         locator = await session.locate(args["ref"])
@@ -988,11 +1026,10 @@ class DownloadTool(BrowserTool):
         )
 
 
-def browser_tools(hub: BrowserHub | None = None) -> list[BrowserTool]:
-    """Fresh instances of all browser tools sharing one hub."""
-    hub = hub or BrowserHub()
+def browser_tools() -> list[BrowserTool]:
+    """One instance of every browser tool. They are stateless, so a single set can be shared by all runs."""
     return [
-        cls(hub)
+        cls()
         for cls in (
             NavigateTool,
             ClickTool,
@@ -1008,6 +1045,6 @@ def browser_tools(hub: BrowserHub | None = None) -> list[BrowserTool]:
     ]
 
 
-def register_browser_tools(registry: ToolRegistry, hub: BrowserHub | None = None) -> list[BrowserTool]:
-    """Register all browser tools (sharing one hub) in ``registry`` and return them."""
-    return [registry.register(tool) for tool in browser_tools(hub)]
+def register_browser_tools(registry: ToolRegistry) -> list[BrowserTool]:
+    """Register all browser tools in ``registry`` and return them."""
+    return [registry.register(tool) for tool in browser_tools()]

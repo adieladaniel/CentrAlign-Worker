@@ -21,11 +21,13 @@ from starlette.background import BackgroundTask
 from worker.config import Settings
 
 AUTH_COOKIE = "ca_auth"
+SESSION_COOKIE = "ca_session"  # the multi-user session cookie (worker/auth.py): never forwarded to the sim
 AUTH_MAX_AGE_S = 7 * 24 * 3600
 # Paths reachable without a session (health check for the platform, the login flow itself).
 PUBLIC_PATHS = frozenset({"/login", "/logout", "/api/health"})
-# Sim paths exposed through the proxy. /company is an alias for the sim's landing page "/".
-PROXY_PREFIXES = ("mail", "portal", "erp", "static")
+# Sim paths exposed through the proxy. /company is an alias for the sim's landing page "/". /t/<token>/ is a tenant's
+# entry link: the sim answers it with a `sim_tenant` cookie (forwarded like every other sim cookie) and a redirect.
+PROXY_PREFIXES = ("mail", "portal", "erp", "static", "t")
 HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
                         "transfer-encoding", "upgrade"})
 PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
@@ -286,7 +288,7 @@ def rewrite_location(location: str, upstream: str) -> str:
 
 
 def install_sim_proxy(app: FastAPI, settings: Settings, access: AccessControl | None = None) -> None:
-    """Forward /mail, /portal, /erp, /static and the /company alias to the internal sim; never /admin.
+    """Forward /mail, /portal, /erp, /static, /t (tenant entry links) and the /company alias to the internal sim; never /admin.
 
     ``app.state.sim_transport`` may be set (before the first request) to route through a test transport.
     """
@@ -309,7 +311,7 @@ def install_sim_proxy(app: FastAPI, settings: Settings, access: AccessControl | 
                 continue
             fwd_headers.append((key, value))
         cookies = [c.strip() for c in request.headers.get("cookie", "").split(";") if c.strip()]
-        cookies = [c for c in cookies if not c.startswith(f"{AUTH_COOKIE}=")]  # never leak the demo session to the sim
+        cookies = [c for c in cookies if not c.startswith((f"{AUTH_COOKIE}=", f"{SESSION_COOKIE}="))]  # never leak a session to the sim
         if cookies:
             fwd_headers.append(("cookie", "; ".join(cookies)))
         if request.method in ("GET", "HEAD", "OPTIONS", "DELETE") and "content-length" not in request.headers \

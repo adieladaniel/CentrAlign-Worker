@@ -131,7 +131,7 @@ async def test_file_sandbox_rejects_escapes(ctx, tmp_path):
 
 async def test_write_read_list_roundtrip_and_downloads_are_read_only(ctx):
     write, read, ls = WriteFileTool(), ReadFileTool(), ListFilesTool()
-    assert write.classify({}) is Risk.WRITE and not write.read_only_safe
+    assert write.classify({}, ctx) is Risk.WRITE and not write.read_only_safe
     res = await write.run({"path": "notes/a.txt", "content": "hello world"}, ctx)
     assert res.ok and (ctx.workspace / "notes" / "a.txt").read_bytes() == b"hello world"
 
@@ -163,16 +163,16 @@ async def test_read_pdf_extracts_text_with_page_markers(ctx):
 # ---------------------------------------------------------------- http
 
 
-def test_http_classify_and_describe():
+def test_http_classify_and_describe(ctx):
     tool = HttpRequestTool()
-    assert tool.classify({"method": "GET"}) is Risk.READ
-    assert tool.classify({"method": "head"}) is Risk.READ
-    assert tool.classify({"method": "POST"}) is Risk.WRITE
-    assert tool.classify({"method": "PUT"}) is Risk.WRITE
-    assert tool.classify({"method": "PATCH"}) is Risk.WRITE
-    assert tool.classify({"method": "DELETE"}) is Risk.IRREVERSIBLE
+    assert tool.classify({"method": "GET"}, ctx) is Risk.READ
+    assert tool.classify({"method": "head"}, ctx) is Risk.READ
+    assert tool.classify({"method": "POST"}, ctx) is Risk.WRITE
+    assert tool.classify({"method": "PUT"}, ctx) is Risk.WRITE
+    assert tool.classify({"method": "PATCH"}, ctx) is Risk.WRITE
+    assert tool.classify({"method": "DELETE"}, ctx) is Risk.IRREVERSIBLE
     assert tool.read_only_safe
-    assert tool.describe_action({"method": "post", "url": "http://localhost/x", "json_body": {"a": 1}}) == 'POST http://localhost/x with body {"a": 1}'
+    assert tool.describe_action({"method": "post", "url": "http://localhost/x", "json_body": {"a": 1}}, ctx) == 'POST http://localhost/x with body {"a": 1}'
 
 
 async def test_http_allowlist_and_read_only_mode(ctx):

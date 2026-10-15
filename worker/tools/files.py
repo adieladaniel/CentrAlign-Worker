@@ -147,7 +147,7 @@ class WriteFileTool(Tool):
     risk = Risk.WRITE
     read_only_safe = False
 
-    def describe_action(self, args: dict) -> str:
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
         return f"Write {len(args.get('content', ''))} characters to '{args.get('path')}'"
 
     async def run(self, args: dict, ctx: ToolContext) -> ToolResult:

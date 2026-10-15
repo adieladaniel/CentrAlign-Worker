@@ -102,7 +102,10 @@ python -m evals.run                                  # every scenario in evals/s
 python -m evals.run --only invoice_happy,deny_write  # a subset
 python -m evals.run --list                           # show scenarios and their chaos flags
 python -m evals.run --repeat 3 --sleep-between 20    # repeat runs; pause between runs for free-tier quotas
+python -m evals.run --parallel 3                     # 3 scenarios at once, each in its own simulated-company tenant
 ```
+
+`--parallel N` implies `--tenant-per-scenario`: every scenario gets a freshly provisioned, isolated copy of the simulated company (own data, logins and chaos flags, reached through an entry link `/t/<token>/`, with its own workspace folder holding that tenant's `credentials.json`), so scenarios cannot disturb each other and share one browser. Without these flags the scenarios run one after the other on the default tenant, as before. Tenants live in `company_sim/data/tenants/`; the sim's `/admin/*` endpoints can be locked with `SIM_ADMIN_TOKEN` (send it as `X-Admin-Token`; set the same variable for the evals and the worker).
 
 Other flags: `--headed`, `--provider gemini|ollama`, `--sim-url`, `--scenarios-dir`. The runner starts the simulator itself if nothing is listening on `SIM_BASE_URL`, resets it with each scenario's chaos flags, runs the real agent in-process with scripted approvals and answers, then judges the result from the simulator's data. It needs a valid `GEMINI_API_KEY`, makes real LLM calls, and takes several minutes on the free tier. Results print as a table and are written to `evals/results/latest.md` (plus a timestamped JSON). Exit code: 0 all passed, 1 some failed, 2 setup problem. See [section 6](#6-evaluation-results).
 
@@ -117,6 +120,32 @@ OLLAMA_URL=http://localhost:11434
 ```
 
 The Ollama adapter uses `/api/chat` with native tool calling behind the same interface as Gemini. Expect much weaker reliability from small models; see [decision 3.12](#312-gemini-free-tier-behind-a-provider-adapter).
+
+### 1.8 Multi-user mode (PostgreSQL)
+
+Set `DATABASE_URL` and the dashboard turns into a multi-user, multi-organization app: people sign in with e-mail and password, belong to organizations with a role, and only ever see their own organization's runs. Without `DATABASE_URL` nothing changes (one shared `ACCESS_PASSWORD` or no auth, runs in files). The switch is `AUTH_MODE` (`auto` = database mode when `DATABASE_URL` is set; `file` ignores the database for sign-in; `db` insists on it).
+
+```bash
+python scripts/bootstrap.py                  # create the database, migrate, seed two demo orgs and their users
+python scripts/bootstrap.py --provision-sim  # also give each demo org its own simulated company (the simulator must be running)
+python run.py                                # simulator + dashboard; sign in at http://localhost:8000
+```
+
+The demo logins are `owner@acme.test`, `admin@acme.test`, `operator@acme.test`, `approver@acme.test`, `viewer@acme.test` (organization **Acme Corp**), and `operator@globex.test`, `approver@globex.test` (organization **Globex**). The demo password is not fixed: `bootstrap` generates one and prints it **once**, the first time it creates the users (or choose it with `--demo-password`); rerunning it never changes existing passwords. Admins add real users under **Admin > Members** (the generated initial password is shown once).
+
+| Role | Watch runs | Start / cancel runs | Approve actions | Answer agent questions | Admin pages (members, settings, credentials, environment) |
+|---|---|---|---|---|---|
+| viewer | yes (read-only) | no | no | no | no |
+| approver | yes | no | yes | yes | no |
+| operator | yes | yes | only if the org sets `operators_can_approve` | yes | no |
+| admin | yes | yes | yes | yes | yes |
+| owner | yes | yes | yes | yes | yes, and the only role that can create or change owners |
+
+**Separation of duties.** With the org setting `separation_of_duties` (on by default) the person who started a run cannot approve its irreversible actions; with `sod_for_writes` also not its writes. They can always deny. The approval card says who may approve and why its buttons are disabled, and the timeline shows "approved by <name>".
+
+**Per-organization environment.** Every org has its own simulated company (mail, vendor portal, ERP) with its own logins, kept in the encrypted credential vault. The agent can use them without ever seeing them, and its browser is pinned to the org's company, so a run can never land in another org's data. Admins manage credentials on the **Credentials** page (secret fields are write-only) and the run quota (`max_runs_per_day`), approval policy and limits under **Admin > Organization settings**.
+
+Sessions are server-side and revocable (`SESSION_IDLE_TTL_HOURS`, `SESSION_ABSOLUTE_TTL_DAYS`), and failed sign-ins are throttled per e-mail and per address. Runs still execute inside the API process, one at a time per organization.
 
 ---
 

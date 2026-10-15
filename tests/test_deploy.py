@@ -255,6 +255,33 @@ def test_proxy_sits_behind_the_password_and_hides_the_demo_cookie(make):
     assert client.get("/company").text == "sim landing"
 
 
+def test_proxy_carries_a_tenant_entry_link_and_its_cookie_to_the_real_sim(make, tmp_path, monkeypatch):
+    from company_sim import config as sim_config
+    from company_sim import tenants
+    from company_sim.app import app as real_sim
+
+    monkeypatch.setattr(sim_config, "DATA_DIR", tmp_path / "simdata")
+    monkeypatch.setattr(sim_config, "DB_PATH", tmp_path / "simdata" / "sim.db")
+    monkeypatch.setattr(sim_config, "PDF_DIR", tmp_path / "simdata" / "pdfs")
+    tenant = tenants.provision_tenant("proxied")
+    client = make(PUBLIC_SIM_PROXY=True, ACCESS_PASSWORD=PASSWORD)
+    client.app.state.sim_transport = httpx.ASGITransport(app=real_sim)  # the real simulator instead of the fake
+    assert client.get(tenant.entry_path).status_code == 303  # the demo password gate still comes first
+    client.post("/login", data={"password": PASSWORD})
+
+    entry = client.get(tenant.entry_path)
+    assert entry.status_code == 303 and entry.headers["location"] == "/"
+    assert f"sim_tenant={tenant.token}" in entry.headers["set-cookie"] and client.cookies["sim_tenant"] == tenant.token
+    assert client.get("/t/not-a-token/").status_code == 404
+    # the browser now talks to the tenant: its own login works, the default tenant's does not
+    assert "Invalid username" in client.post("/erp/login", data={"username": sim_config.ERP_USER,
+                                                                 "password": sim_config.ERP_PASSWORD}).text
+    login = client.post("/erp/login", data=tenant.credentials["erp"])
+    assert login.status_code == 303 and login.headers["location"] == "/erp/bills"
+    assert "Company X Ltd" in client.get("/erp/bills").text
+    assert "ca_auth" in client.cookies and "sim_tenant" in client.cookies  # the gate cookie is separate and still ours
+
+
 # --------------------------------------------------------------------------- run cap, flags
 
 

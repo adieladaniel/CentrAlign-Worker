@@ -109,14 +109,16 @@ class Verifier:
             Message(role="user", content=_briefing(task, criteria, claim, facts_text)),
         ]
         usage = Verdict(passed=False)
+        redactor = ctx.extras.get("redactor")
         previous = ctx.extras.get("read_only")
         ctx.extras["read_only"] = True
         try:
             for turn in range(self.max_steps):
                 last_turn = turn == self.max_steps - 1
                 specs = [self._verdict_spec] if last_turn else self._tools.specs() + [self._verdict_spec]
+                outgoing = redactor.redact_messages(messages) if redactor else messages  # claim and facts come from the worker
                 try:
-                    response = await self._llm.complete(messages, specs, tool_choice="any" if last_turn else "auto")
+                    response = await self._llm.complete(outgoing, specs, tool_choice="any" if last_turn else "auto")
                 except LLMError as err:
                     return self._inconclusive(usage, f"The auditor's LLM call failed: {err}")
                 usage.llm_calls += 1
@@ -147,7 +149,7 @@ class Verifier:
         started = time.monotonic()
         if tool is None:
             result = ToolResult(False, f"Tool '{call.name}' is not available to the auditor (read-only tools only).", "unavailable")
-        elif tool.classify(call.args) is not Risk.READ:
+        elif tool.classify(call.args, ctx) is not Risk.READ:
             result = ToolResult(False, "Refused: the auditor may only perform read-only actions.", "read_only_mode")
         else:
             result = await execute_with_retry(tool, call.args, ctx)

@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from worker.agent.broker import InteractionBroker
 from worker.agent.context import build_messages, compress_step
@@ -19,6 +19,7 @@ from worker.agent.prompts import (
     DENIED_TEMPLATE,
     FINISH_NOT_ALONE,
     NO_TOOL_NUDGE,
+    RESUME_NOTE,
     SKIPPED_AFTER_FAILURE,
     VERIFY_FAILED_TEMPLATE,
 )
@@ -36,10 +37,15 @@ from worker.agent.thoughts import THOUGHT_LIMIT, clean_thought
 from worker.agent.verifier import Verdict, Verifier
 from worker.config import Settings
 from worker.llm.base import LLMClient, LLMError, LLMResponse, ToolCall
+from worker.redaction import RedactingStore, Redactor
+from worker.store import FileRunStore, RunStore
 from worker.tools.base import Risk, Tool, ToolContext, ToolResult
 from worker.tools.control import normalize_finish
 from worker.tools.registry import ToolRegistry
 from worker.tools.retry import execute_with_retry
+
+if TYPE_CHECKING:
+    from worker.vault import VaultScope
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +55,10 @@ MAX_TEXT_ONLY_REPLIES = 2
 EVENT_OBSERVATION_LIMIT = 2000
 _RETRY_NOTE = re.compile(r"after (\d+) automatic retr")
 _STOP_WORDS = ("stop", "cancel", "abort", "quit", "give up")
+
+
+class ResumeError(Exception):
+    """The run cannot be resumed (unknown run, or it already reached a final status)."""
 
 
 class _Stop(Exception):
@@ -63,7 +73,15 @@ class _Stop(Exception):
 class AgentRunner:
     """Runs one task to completion. Usage: ``state = await AgentRunner(task, llm, registry, settings, broker).run()``.
 
-    Events are pushed to ``event_sink(event_type, payload)``; every payload carries ``run_id``.
+    Everything is persisted through ``store`` (default: ``FileRunStore(settings.RUNS_DIR)``). Events are appended to the
+    store and pushed to ``event_sink(event_type, payload)``; every payload carries ``run_id``. An interrupted run is
+    continued with ``await AgentRunner.resume(run_id, ...)`` followed by ``.run()``.
+
+    ``clock`` is the monotonic time source of the wall-clock guard (injectable for tests).
+
+    ``vault_scope`` (see ``worker/vault.py``) gives the run credentials it can use through the secret tools without ever
+    seeing them. When it holds any, a ``Redactor`` built from its secret values scrubs everything that is stored (the
+    store is wrapped in a ``RedactingStore``), emitted, shown to approvers or sent to the model.
     """
 
     def __init__(
@@ -75,13 +93,27 @@ class AgentRunner:
         broker: InteractionBroker,
         run_id: str | None = None,
         event_sink: EventSink | None = None,
+        store: RunStore | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        state: RunState | None = None,
+        vault_scope: VaultScope | None = None,
     ):
         self.llm, self.registry, self.settings, self.broker = llm, registry, settings, broker
-        self.state = RunState(run_id=run_id or uuid.uuid4().hex[:8], task=task)
+        self.store: RunStore = store or FileRunStore(settings.RUNS_DIR)
+        self.vault_scope = vault_scope
+        self.redactor: Redactor | None = (Redactor.from_scope(vault_scope) or None) if vault_scope else None
+        self._vault_public = vault_scope.public() if vault_scope else []
+        if self.redactor:
+            self.store = RedactingStore(self.store, self.redactor)
+        self._clock = clock
+        self.state = state or RunState(run_id=run_id or uuid.uuid4().hex, task=task)  # ``state``: see ``resume``
+        if self.redactor:
+            self.state.task = self.redactor.redact(self.state.task)
         self.memory = WorkingMemory(self.state.facts)
         self.policy = ApprovalPolicy(settings.APPROVAL_MODE)
-        self.guards = Guards(settings.MAX_STEPS, settings.MAX_CONSECUTIVE_FAILURES, settings.RUN_TIMEOUT_S)
-        self.run_dir = Path(settings.RUNS_DIR) / self.state.run_id
+        self.guards = self._new_guards()
+        self.run_dir = self.store.artifact_dir(self.state.run_id)
         self.ctx = ToolContext(
             run_id=self.state.run_id,
             run_dir=self.run_dir,
@@ -91,10 +123,16 @@ class AgentRunner:
             emit=self._emit,
             extras={"interact": self._interact},
         )
+        if vault_scope is not None:
+            self.ctx.extras["vault_scope"] = vault_scope
+        if self.redactor:
+            self.ctx.extras["redactor"] = self.redactor
         self._sink = event_sink
         self._cancelled = asyncio.Event()
         self._turn = 0
         self._text_only = 0
+        self._force_tool = False
+        self._resume_count = 0
         self._nudges: list[str] = []
         self._feedback = ""
         self._verify_failures = 0
@@ -103,6 +141,44 @@ class AgentRunner:
         self._approvals = {"requested": 0, "approved": 0, "denied": 0}
         if hasattr(llm, "on_retry"):  # ResilientLLM: surface network waits in the UI and let cancel interrupt them
             llm.on_retry = self._on_llm_retry
+
+    def _new_guards(self, data: dict | None = None) -> Guards:
+        args = (self.settings.MAX_STEPS, self.settings.MAX_CONSECUTIVE_FAILURES, self.settings.RUN_TIMEOUT_S)
+        return Guards.from_dict(data, *args, clock=self._clock) if data else Guards(*args, clock=self._clock)
+
+    @classmethod
+    async def resume(
+        cls,
+        run_id: str,
+        llm: LLMClient,
+        registry: ToolRegistry,
+        settings: Settings,
+        broker: InteractionBroker,
+        event_sink: EventSink | None = None,
+        store: RunStore | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        vault_scope: VaultScope | None = None,
+    ) -> AgentRunner:
+        """Rebuild the runner of an interrupted run from the store; ``await .run()`` then continues where it stopped.
+
+        The state and the hidden runtime state (counters, guards, approval cache) are loaded, a system note telling
+        the agent to re-check the world is added, and ``resume_count`` is incremented. The approval mode the run
+        started with is kept; limits come from ``settings``. Raises ``ResumeError`` for unknown or finished runs.
+        """
+        store = store or FileRunStore(settings.RUNS_DIR)
+        state = await store.load_state(run_id)
+        if state is None:
+            raise ResumeError(f"Unknown run {run_id}.")
+        if state.status in TERMINAL_STATUSES:
+            raise ResumeError(f"Run {run_id} already ended as '{state.status}' and cannot be resumed.")
+        runner = cls(state.task, llm, registry, settings, broker, event_sink=event_sink, store=store, clock=clock,
+                     state=state, vault_scope=vault_scope)
+        runner._restore(await store.load_runtime(run_id) or {})
+        runner._resume_count += 1
+        runner._nudges.append(RESUME_NOTE)
+        await runner._add_step(Step(kind="system", thought=RESUME_NOTE, error="resumed", turn=runner._turn))
+        return runner
 
     async def _on_llm_retry(self, info: dict) -> None:
         """Called by ResilientLLM before each wait during a network outage."""
@@ -119,11 +195,15 @@ class AgentRunner:
     # ------------------------------------------------------------------ lifecycle
 
     async def run(self) -> RunState:
-        """Execute the task and return the final state (also persisted under ``runs/<run_id>/``)."""
-        self.run_dir.mkdir(parents=True, exist_ok=True)
+        """Execute the task (or continue a resumed one) and return the final state, persisted in the store."""
         self.state.status = "running"
-        self._save()
-        await self._emit("run_started", {"task": self.state.task, "approval_mode": self.policy.mode})
+        if self._resume_count:
+            await self._checkpoint()
+            await self._emit("run_resumed", {"resume_count": self._resume_count, "message": RESUME_NOTE})
+        else:
+            await self.store.create_run(self.state)
+            await self.store.save_runtime(self.state.run_id, self._runtime())
+            await self._emit("run_started", {"task": self.state.task, "approval_mode": self.policy.mode})
         status, reason = "failed", ""
         try:
             await self._loop()
@@ -141,15 +221,17 @@ class AgentRunner:
     async def _loop(self) -> None:
         tool_names = self.registry.names()
         specs = self.registry.specs()
-        force_tool = False
         while True:
             await self._check_stop()
             messages = build_messages(
-                self.state, self.settings, tool_names, nudges=self._nudges, feedback=self._feedback
+                self.state, self.settings, tool_names, nudges=self._nudges, feedback=self._feedback,
+                vault_credentials=self._vault_public,
             )
+            if self.redactor:  # last line of defense: whatever got into the state, the model never receives a secret
+                messages = self.redactor.redact_messages(messages)
             self._nudges = []
             try:
-                response = await self.llm.complete(messages, specs, tool_choice="any" if force_tool else "auto")
+                response = await self.llm.complete(messages, specs, tool_choice="any" if self._force_tool else "auto")
             except LLMError as err:
                 raise _Stop("needs_attention", f"The language model could not be reached: {err}") from err
             await self._account(response)
@@ -159,10 +241,9 @@ class AgentRunner:
                 await self._emit("thought", {"turn": self._turn, "text": thought})
 
             if not response.tool_calls:
-                self._handle_text_only(response.text)
-                force_tool = True
+                await self._handle_text_only(response.text)
                 continue
-            self._text_only, force_tool = 0, False
+            self._text_only, self._force_tool = 0, False
             await self._handle_calls(response, thought, is_summary)
             event = self.guards.check_progress()
             if event is not None:
@@ -179,14 +260,18 @@ class AgentRunner:
 
     # ------------------------------------------------------------------ turn handling
 
-    def _handle_text_only(self, text: str) -> None:
+    async def _handle_text_only(self, text: str) -> None:
         """The model answered without a tool call: nudge once (forcing a tool call), then give up honestly."""
         self._text_only += 1
-        self._add_step(Step(kind="llm", thought=text, ok=False, error="no_tool_call", turn=self._turn))
-        if self._text_only >= MAX_TEXT_ONLY_REPLIES:
-            self._claim = {"summary": text, "outputs": {}, "evidence": []}
+        self._force_tool = True
+        giving_up = self._text_only >= MAX_TEXT_ONLY_REPLIES
+        if giving_up:
+            self._claim = self._redact({"summary": text, "outputs": {}, "evidence": []})
+        else:
+            self._nudges.append(NO_TOOL_NUDGE)
+        await self._add_step(Step(kind="llm", thought=text, ok=False, error="no_tool_call", turn=self._turn))
+        if giving_up:
             raise _Stop("needs_attention", "The agent stopped calling tools without finishing; its last message is the summary.")
-        self._nudges.append(NO_TOOL_NUDGE)
 
     @staticmethod
     def _thought_of(response: LLMResponse) -> tuple[str, bool]:
@@ -225,7 +310,7 @@ class AgentRunner:
         step.kind = "ask_user" if tool.name == "ask_user" else "tool"
         self.memory.step = len(self.state.steps) + 1
         await self._emit("tool_started", {"turn": self._turn, "tool": tool.name, "args": step.args, "risk": step.risk,
-                                          "action": tool.describe_action(step.args)})
+                                          "action": tool.describe_action(step.args, self.ctx)})
         started = time.monotonic()
         result = await execute_with_retry(tool, step.args, self.ctx)
         step.duration_ms = int((time.monotonic() - started) * 1000)
@@ -237,14 +322,14 @@ class AgentRunner:
             await self._apply_plan(result.data or {})
         return await self._finish_step(step)
 
-    @staticmethod
-    def _classify(tool: Tool, args: dict) -> Risk:
+    def _classify(self, tool: Tool, args: dict) -> Risk:
         try:
-            return tool.classify(args)
+            return tool.classify(args, self.ctx)
         except Exception:  # noqa: BLE001 - malformed args: assume the tool's declared risk
             return tool.risk
 
     async def _apply_plan(self, data: dict) -> None:
+        data = self._redact(data)
         self.state.plan = [PlanItem(**item) for item in data.get("plan", [])]
         self.state.goal_summary = data.get("goal_summary", self.state.goal_summary)
         self.state.success_criteria = data.get("success_criteria", self.state.success_criteria)
@@ -254,7 +339,7 @@ class AgentRunner:
     # ------------------------------------------------------------------ approval and questions
 
     async def _seek_approval(self, tool: Tool, step: Step, risk: Risk) -> tuple[bool, str]:
-        action = tool.describe_action(step.args)
+        action = tool.describe_action(step.args, self.ctx)
         context: dict[str, Any] = {"reason": step.thought, "facts": self.memory.render()}
         try:  # what the human is about to approve, e.g. the filled form fields; never blocks the approval
             preview = await asyncio.wait_for(tool.approval_preview(step.args, self.ctx), timeout=5)
@@ -270,16 +355,20 @@ class AgentRunner:
         note = str(response.get("note") or ("" if response else "no response received"))
         self.policy.record_response(tool, risk, response)
         self._approvals["approved" if approved else "denied"] += 1
-        self._add_step(Step(kind="approval", tool=tool.name, args=step.args, risk=risk.value, ok=approved,
+        by = response.get("by") if isinstance(response.get("by"), dict) else {}  # who answered (multi-user mode)
+        who = f" by {by.get('name') or by.get('email')}" if by.get("name") or by.get("email") else ""
+        await self._add_step(Step(kind="approval", tool=tool.name, args=step.args, risk=risk.value, ok=approved,
                             thought=note, turn=self._turn,
-                            observation=f"{'APPROVED' if approved else 'DENIED'}: {action}"))
+                            observation=f"{'APPROVED' if approved else 'DENIED'}{who}: {action}"))
         return approved, note
 
     async def _interact(self, kind: str, payload: dict) -> Any:
         """Ask the human via the broker (kind: "approval" | "question"). Returns None on timeout or cancellation."""
+        payload = self._redact(payload)
         approval = kind == "approval"
+        self.guards.pause_clock()  # waiting for a human does not count against the run's time limit
         self.state.status = "waiting_approval" if approval else "waiting_user"
-        self._save()
+        await self._checkpoint()
 
         async def announce(request_id: str) -> None:
             await self._emit("approval_requested" if approval else "question_asked", {"request_id": request_id, **payload})
@@ -296,6 +385,7 @@ class AgentRunner:
                 pending.cancel()
             if self.state.status in ("waiting_approval", "waiting_user"):
                 self.state.status = "running"
+            self.guards.resume_clock()
         await self._emit("approval_resolved" if approval else "question_answered",
                          {"response": response, "answered": response is not None})
         return response
@@ -303,7 +393,7 @@ class AgentRunner:
     # ------------------------------------------------------------------ finish and verification
 
     async def _handle_finish(self, step: Step) -> None:
-        claim = normalize_finish(step.args)
+        claim = self._redact(normalize_finish(step.args))
         self._claim = claim
         if claim["status"] != "success":
             await self._finish_step(self._ok(step, "Finish recorded."))
@@ -320,15 +410,15 @@ class AgentRunner:
             raise _Stop("needs_attention", f"The result could not be independently verified: {verdict.summary}")
         problems = "\n".join(f"- {c['criterion']}: {c['observed']}" for c in verdict.failed_checks) or "- (no details)"
         feedback = VERIFY_FAILED_TEMPLATE.format(problems=problems, summary=verdict.summary)
-        await self._finish_step(self._fail(step, "verification_failed", feedback))
         self._verify_failures += 1
+        self._feedback = f"{problems}\n(Auditor summary: {verdict.summary})"
+        await self._finish_step(self._fail(step, "verification_failed", feedback))  # checkpoints the two lines above
         if self._verify_failures > MAX_VERIFY_ROUNDS:
             raise _Stop("failed", f"Independent verification failed after {MAX_VERIFY_ROUNDS} correction rounds.")
-        self._feedback = f"{problems}\n(Auditor summary: {verdict.summary})"
 
     async def _verify(self, claim: dict) -> Verdict:
         self.state.status = "verifying"
-        self._save()
+        await self._checkpoint()
         await self._emit("verification_started", {"criteria": self.state.success_criteria})
         verdict = await Verifier(self.llm, self.registry).verify(
             task=self.state.task, criteria=self.state.success_criteria, claim=claim,
@@ -351,9 +441,10 @@ class AgentRunner:
 
     async def _apply_guard(self, event: GuardEvent) -> None:
         await self._emit("guard_triggered", {"guard": event.guard, "level": event.level, "message": event.message})
-        self._add_step(Step(kind="system", thought=event.message, ok=False, error=event.guard, turn=self._turn))
         if event.level == "nudge":
             self._nudges.append(event.message)
+        await self._add_step(Step(kind="system", thought=event.message, ok=False, error=event.guard, turn=self._turn))
+        if event.level == "nudge":
             return
         recent = next((compress_step(s) for s in reversed(self.state.steps) if s.kind == "tool" and not s.ok), "")
         question = f"I'm stuck: {event.message} Last problem: {recent or 'none recorded'}. How should I proceed?"
@@ -363,6 +454,7 @@ class AgentRunner:
             raise _Stop("needs_attention", f"Stopped: {event.message} No guidance was given to continue.")
         self._nudges.append(f"The user answered your request for help: {answer}")
         self.guards.reset_after_guidance()
+        await self._checkpoint()
 
     # ------------------------------------------------------------------ recording helpers
 
@@ -376,14 +468,21 @@ class AgentRunner:
         step.ok, step.error, step.observation = False, error, observation
         return step
 
-    def _add_step(self, step: Step) -> Step:
+    def _redact(self, obj: Any) -> Any:
+        """``obj`` with vault secrets scrubbed (unchanged when the run has no vault credentials)."""
+        return self.redactor.redact_obj(obj) if self.redactor else obj
+
+    async def _add_step(self, step: Step) -> Step:
+        if self.redactor:
+            self.redactor.redact_step(step)
         self.state.add_step(step)
-        self._save()
+        await self.store.append_step(self.state.run_id, step)
+        await self._checkpoint()
         return step
 
     async def _finish_step(self, step: Step, *, phase: str = "work", feed_guards: bool = True) -> Step:
         """Store the step, feed the guards, persist, and tell the UI."""
-        self._add_step(step)
+        await self._add_step(step)
         if feed_guards:
             self.guards.record(step)
         payload = asdict(step)
@@ -391,14 +490,60 @@ class AgentRunner:
         await self._emit("tool_finished", {**payload, "phase": phase})
         return step
 
-    def _save(self) -> None:
-        self.state.save(self.run_dir / "run.json")
+    async def _checkpoint(self) -> None:
+        """Persist the run header and the runtime state (what a resumed run needs besides the steps)."""
+        await self.store.save_state(self.state)
+        await self.store.save_runtime(self.state.run_id, self._runtime())
+
+    def _runtime(self) -> dict:
+        """The runner's hidden in-memory state as a JSON-serializable dict (the inverse of ``_restore``)."""
+        return {
+            "turn": self._turn,
+            "text_only": self._text_only,
+            "force_tool": self._force_tool,
+            "nudges": list(self._nudges),
+            "feedback": self._feedback,
+            "verify_failures": self._verify_failures,
+            "claim": self._claim,
+            "verdict": asdict(self._verdict) if self._verdict else None,
+            "approvals": dict(self._approvals),
+            "resume_count": self._resume_count,
+            "guards": self.guards.to_dict(),
+            "policy": self.policy.to_dict(),
+        }
+
+    def _restore(self, runtime: dict) -> None:
+        """Load a ``_runtime`` dict. Missing keys keep their defaults (a run interrupted before its first checkpoint)."""
+        self._turn = runtime.get("turn", 0)
+        self._text_only = runtime.get("text_only", 0)
+        self._force_tool = runtime.get("force_tool", False)
+        self._nudges = list(runtime.get("nudges", []))
+        self._feedback = runtime.get("feedback", "")
+        self._verify_failures = runtime.get("verify_failures", 0)
+        self._claim = runtime.get("claim")
+        self._verdict = Verdict(**runtime["verdict"]) if runtime.get("verdict") else None
+        self._approvals = {**self._approvals, **runtime.get("approvals", {})}
+        self._resume_count = runtime.get("resume_count", 0)
+        self.guards = self._new_guards(runtime.get("guards"))
+        if runtime.get("policy"):
+            self.policy = ApprovalPolicy.from_dict(runtime["policy"])
 
     async def _emit(self, event_type: str, payload: dict) -> None:
+        payload = {"run_id": self.state.run_id, **payload}
+        if event_type == "memory_updated":
+            fact = self.state.facts[payload["key"]]
+            if self.redactor:
+                self.redactor.redact_fact(fact)
+            await self.store.upsert_fact(self.state.run_id, fact)
+        payload = self._redact(payload)
+        try:
+            await self.store.append_event(self.state.run_id, event_type, payload)
+        except Exception:  # noqa: BLE001 - the event log is observability; losing an entry must not kill the run
+            log.exception("could not store event %s", event_type)
         if self._sink is None:
             return
         try:
-            await self._sink(event_type, {"run_id": self.state.run_id, **payload})
+            await self._sink(event_type, payload)
         except Exception:  # noqa: BLE001 - a broken UI must not kill the run
             log.exception("event sink failed for %s", event_type)
 
@@ -422,11 +567,11 @@ class AgentRunner:
     async def _finish_run(self, status: str, reason: str) -> None:
         assert status in TERMINAL_STATUSES
         await self._close_browser()
-        report = build_report(self.state, status=status, claim=self._claim, verdict=self._verdict, reason=reason,
-                              approvals=self._approvals, run_dir=self.run_dir)
+        report = self._redact(build_report(self.state, status=status, claim=self._claim, verdict=self._verdict,
+                                           reason=reason, approvals=self._approvals, run_dir=self.run_dir))
         self.state.status, self.state.final_report, self.state.finished_at = status, report, utcnow()
-        self._save()
-        (self.run_dir / "report.md").write_text(render_markdown(self.state, report), encoding="utf-8")
+        await self._checkpoint()
+        await self.store.save_report(self.state.run_id, report, render_markdown(self.state, report))
         await self._emit("run_finished", {"status": status, "report": report})
 
     async def _close_browser(self) -> None:

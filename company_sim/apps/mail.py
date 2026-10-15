@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from .. import config, db
+from .. import config, db, tenants
 from ..auth import mail_auth
 from .common import add_login_routes, flash, redirect, render
 
@@ -53,7 +53,7 @@ async def download_attachment(message_id: int, _: dict = Depends(user)):
     msg = db.query_one("SELECT attachment_invoice FROM emails WHERE id = ?", (message_id,))
     if not msg or not msg["attachment_invoice"]:
         raise HTTPException(404, "Attachment not found")
-    path = config.PDF_DIR / f"{msg['attachment_invoice']}.pdf"
+    path = tenants.pdf_dir() / f"{msg['attachment_invoice']}.pdf"
     if not path.exists():
         raise HTTPException(404, "Attachment file missing")
     return FileResponse(path, media_type="application/pdf", filename=f"Invoice_{msg['attachment_invoice']}.pdf")
@@ -93,7 +93,7 @@ async def compose_submit(request: Request, session: dict = Depends(user)):
     db.execute(
         "INSERT INTO emails (folder, sender, recipient, subject, body, sent_at, in_reply_to, is_read)"
         " VALUES ('sent', ?, ?, ?, ?, ?, ?, 1)",
-        (config.MAIL_USER, values["to"], values["subject"], values["body"], sent_at, reply_to),
+        (tenants.current_credentials("mail")["username"], values["to"], values["subject"], values["body"], sent_at, reply_to),
     )
     flash(session, "Message sent")
     return redirect("/mail/sent")

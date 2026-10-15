@@ -23,7 +23,7 @@ class AskUserTool(Tool):
     }
     read_only_safe = False
 
-    def describe_action(self, args: dict) -> str:
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
         return f"Ask the user: {args.get('question')}"
 
     async def run(self, args: dict, ctx: ToolContext) -> ToolResult:

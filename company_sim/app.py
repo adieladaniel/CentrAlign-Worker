@@ -1,4 +1,4 @@
-"""FastAPI application: landing page + mail, portal, ERP apps + admin endpoints."""
+"""FastAPI application: landing page + mail, portal, ERP apps + admin endpoints, for any number of tenants."""
 from __future__ import annotations
 
 import asyncio
@@ -14,6 +14,8 @@ from . import chaos, config, db, seed
 from .apps import admin, erp, mail, portal
 from .apps.common import render
 from .auth import LoginRequired
+from .tenant_web import TenantMiddleware
+from .tenant_web import router as tenant_router
 
 
 @asynccontextmanager
@@ -28,7 +30,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Acme company simulator", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
-for module_router in (mail.router, portal.router, erp.router, erp.api, admin.router):
+for module_router in (mail.router, portal.router, erp.router, erp.api, admin.router, tenant_router):
     app.include_router(module_router)
 
 
@@ -41,9 +43,12 @@ async def login_required_handler(_: Request, exc: LoginRequired) -> RedirectResp
 async def slow_pages(request: Request, call_next):
     """Chaos: add 1-3 s latency to page loads."""
     path = request.url.path
-    if chaos.is_on("slow_pages") and not path.startswith(("/static", "/admin", "/erp/api")):
+    if chaos.is_on("slow_pages") and not path.startswith(("/static", "/admin", "/t/", "/erp/api")):
         await asyncio.sleep(random.uniform(1, 3))
     return await call_next(request)
+
+
+app.add_middleware(TenantMiddleware)  # added last = outermost: every other middleware and handler sees the tenant
 
 
 @app.get("/", include_in_schema=False)

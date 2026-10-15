@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Any, Iterator, Sequence
 
-from . import config
+from . import tenants
 
 SCHEMA = """
 CREATE TABLE vendors (
@@ -64,9 +64,10 @@ TABLES = ("bills", "emails", "invoice_items", "invoices", "vendors")
 
 
 def connect() -> sqlite3.Connection:
-    """Open a connection with dict-like rows."""
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(config.DB_PATH, timeout=10)
+    """Open a connection to the current tenant's database, with dict-like rows."""
+    path = tenants.db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -109,7 +110,7 @@ def recreate_schema(conn: sqlite3.Connection) -> None:
 
 
 def is_seeded() -> bool:
-    if not config.DB_PATH.exists():
+    if not tenants.db_path().exists():
         return False
     row = query_one("SELECT name FROM sqlite_master WHERE type='table' AND name='bills'")
     return row is not None

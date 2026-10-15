@@ -92,14 +92,29 @@ def state_block(state: RunState, nudges: list[str], feedback: str, budget: int) 
     return "\n\n".join(parts)
 
 
-def _first_user_message(state: RunState, settings: Settings, tool_names: list[str], older: list[list[Step]]) -> str:
+def vault_line(credentials: list[dict]) -> str:
+    """Environment bullet naming the vault credentials (names and descriptions only, never values)."""
+    names = ", ".join(c["name"] + (f" ({c['description']})" if c.get("description") else "") for c in credentials)
+    return (f"- Credentials are available in the secure vault: {names}. Use list_credentials, browser_fill_secret and "
+            "http_request(auth_credential=...); you never see the values.")
+
+
+def _first_user_message(
+    state: RunState,
+    settings: Settings,
+    tool_names: list[str],
+    older: list[list[Step]],
+    vault_credentials: list[dict] | None = None,
+) -> str:
     lines = [
         f"Task from the user:\n{state.task}",
         f"Today's date: {date.today().isoformat()}",
         "Environment:\n"
         f"- Tools: {', '.join(tool_names)}\n"
         f"- Shared workspace folder (list_files/read_file/write_file): {settings.WORKSPACE_DIR}\n"
-        f"- Company intranet start page: {settings.SIM_BASE_URL}",
+        + (f"- Company intranet start page (open this link first; it selects your organization's environment): {settings.SIM_ENTRY_URL}"
+           if settings.SIM_ENTRY_URL else f"- Company intranet start page: {settings.SIM_BASE_URL}")
+        + (f"\n{vault_line(vault_credentials)}" if vault_credentials else ""),
     ]
     history = [compress_step(s) for turn in older for s in turn]
     if history:
@@ -119,12 +134,14 @@ def build_messages(
     nudges: list[str] | None = None,
     feedback: str = "",
     window: int = WINDOW_STEPS,
+    vault_credentials: list[dict] | None = None,
 ) -> list[Message]:
-    """Assemble the full message list for the next LLM call."""
+    """Assemble the full message list for the next LLM call. ``vault_credentials`` is the public description of the
+    run's vault credentials (``VaultScope.public()``); when empty the environment section is unchanged."""
     older, recent = _split_window(_turns(state.steps), window)
     messages = [
         Message(role="system", content=SYSTEM_PROMPT),
-        Message(role="user", content=_first_user_message(state, settings, tool_names, older)),
+        Message(role="user", content=_first_user_message(state, settings, tool_names, older, vault_credentials)),
         *transcript_messages(recent),
     ]
     block = state_block(state, nudges or [], feedback, settings.MAX_STEPS)

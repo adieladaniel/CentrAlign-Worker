@@ -134,7 +134,11 @@ async function api(method, url, body) {
   });
   let data = null;
   try { data = await resp.json(); } catch (e) { /* no body */ }
-  if (resp.status === 401) { location.href = "/login?next=" + encodeURIComponent(location.pathname); throw new Error("Please sign in"); }
+  if (resp.status === 401) {
+    if (S.mode === "db") { showLogin("Your session has ended. Please sign in again."); throw new Error("Please sign in"); }
+    location.href = "/login?next=" + encodeURIComponent(location.pathname);
+    throw new Error("Please sign in");
+  }
   if (!resp.ok) {
     const detail = data && data.detail ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : resp.statusText;
     throw new Error(detail);
@@ -145,6 +149,8 @@ async function api(method, url, body) {
 /* ------------------------------------------------------------------ state */
 
 const S = {
+  mode: "file", // "file" = v1 (shared password or none), "db" = multi-user (see detectMode)
+  me: null, signedIn: false, runMeta: null, runIndex: new Map(), started: false,
   ws: null, connToken: 0, runId: null, finished: false, activeRunId: null,
   autoscroll: true, scrollQueued: false,
   view: null, // per-run rendering state, rebuilt by resetView()
@@ -406,7 +412,32 @@ async function respond(payload, buttons) {
   } catch (err) {
     toast(`Could not send response: ${err.message}`, "error");
     buttons.forEach((b) => (b.disabled = false));
+    if (S.view.gate) S.view.gate();
   }
+}
+
+const APPROVER_ROLES = ["approver", "admin", "owner"];
+
+/* Who may answer this approval, and may the current user approve it? The server enforces the same rules
+ * (worker/org_settings.py); this only explains them and disables the buttons. */
+function approvalRights(risk) {
+  if (S.mode !== "db" || !S.me) return { who: "", canApprove: true, canDeny: true, reason: "" };
+  const policy = S.me.org.policy;
+  const roles = APPROVER_ROLES.concat(policy.operators_can_approve ? ["operator"] : []);
+  let who = `Can approve: ${roles.join(", ")}.`;
+  if (policy.separation_of_duties) {
+    who += ` Whoever started the run cannot approve its irreversible actions${policy.sod_for_writes ? " or writes" : ""}.`;
+  }
+  if (!S.me.capabilities.approve) {
+    const hint = S.me.org.role === "operator" ? " An admin can allow operators to approve in the organization settings." : "";
+    return { who, canApprove: false, canDeny: false, reason: `Your role (${S.me.org.role}) cannot answer approvals.${hint}` };
+  }
+  const starter = S.runMeta && S.runMeta.started_by && S.runMeta.started_by.id;
+  const blocked = policy.separation_of_duties && starter === S.me.user.id && (risk === "irreversible" || (risk === "write" && policy.sod_for_writes));
+  if (blocked) {
+    return { who, canApprove: false, canDeny: true, reason: `Separation of duties: you started this run, so someone else must approve its ${risk} actions. You can still deny.` };
+  }
+  return { who, canApprove: true, canDeny: true, reason: "" };
 }
 
 function handleApprovalRequested(p) {
@@ -419,12 +450,24 @@ function handleApprovalRequested(p) {
   approve.addEventListener("click", () => respond({ request_id: p.request_id, approved: true, note: note.value }, buttons));
   similar.addEventListener("click", () => respond({ request_id: p.request_id, approved: true, remember: true, note: note.value }, buttons));
   deny.addEventListener("click", () => respond({ request_id: p.request_id, approved: false, note: note.value }, buttons));
-  if (p.risk === "irreversible") { similar.disabled = true; similar.title = "Irreversible actions are always asked individually"; }
+  const rightsBox = h("div", { class: "rights-note small hidden" });
+  const gate = () => { // re-run when the run's starter becomes known
+    const rights = approvalRights(p.risk);
+    approve.disabled = !rights.canApprove;
+    similar.disabled = !rights.canApprove || p.risk === "irreversible";
+    deny.disabled = !rights.canDeny;
+    note.disabled = !rights.canDeny;
+    similar.title = p.risk === "irreversible" ? "Irreversible actions are always asked individually" : "Approve this and skip the prompt for similar actions in this run";
+    rightsBox.replaceChildren(rights.reason ? h("div", { class: "rights-reason" }, rights.reason) : null, rights.who ? h("div", { class: "muted" }, rights.who) : null);
+    rightsBox.classList.toggle("hidden", !rights.reason && !rights.who);
+  };
+  v.gate = gate;
+  gate();
   const card = h("div", { class: "pending-card" },
     pendingTitle("Approval needed", "approval"),
     h("div", null, riskTag(p.risk), " ", h("span", { class: "muted small" }, `tool: ${p.tool}`)),
     h("div", { class: "pending-action" }, p.action || p.tool),
-    kvTable(p.args), contextBlock(p.context),
+    kvTable(p.args), contextBlock(p.context), rightsBox,
     h("div", { class: "pending-buttons" }, approve, similar, deny, note));
   $("pending").replaceChildren(card);
   v.pendingCard = card;
@@ -442,6 +485,7 @@ function handleApprovalResolved(p) {
   const v = S.view;
   $("pending").replaceChildren();
   v.pendingCard = null;
+  v.gate = null;
   document.title = "CentrAlign Worker";
   const resp = p.response || {};
   const approved = !!resp.approved;
@@ -452,7 +496,8 @@ function handleApprovalResolved(p) {
   if (e) {
     e.el.dataset.state = approved ? "ok" : "neutral";
     const badges = e.el.querySelector(".step-badges");
-    const label = !p.answered ? "no response" : approved ? (resp.remember ? "approved (similar too)" : "approved") : "denied";
+    const by = resp.by && (resp.by.name || resp.by.email) ? ` by ${resp.by.name || resp.by.email}` : "";
+    const label = !p.answered ? "no response" : approved ? (resp.remember ? `approved${by} (similar too)` : `approved${by}`) : `denied${by}`;
     badges.replaceChildren(riskTag(e.risk), h("span", { class: `tag ${approved ? "tag-ok" : "tag-warn"}` }, label));
     if (resp.note) e.el.append(h("div", { class: "step-note" }, `Note: ${resp.note}`));
   }
@@ -465,6 +510,8 @@ function handleQuestionAsked(p) {
   const send = h("button", { class: "btn btn-approve", type: "button" }, "Send answer");
   const options = (p.options || []).map((o) => h("button", { class: "btn btn-option", type: "button" }, o));
   const buttons = [send, ...options];
+  const mayAnswer = S.mode !== "db" || !S.me || S.me.capabilities.answer;
+  if (!mayAnswer) { buttons.forEach((b) => (b.disabled = true)); answer.disabled = true; answer.placeholder = "Viewers cannot answer questions"; }
   options.forEach((b) => b.addEventListener("click", () => respond({ request_id: p.request_id, answer: b.textContent }, buttons)));
   const submit = () => { if (answer.value.trim()) respond({ request_id: p.request_id, answer: answer.value.trim() }, buttons); };
   send.addEventListener("click", submit);
@@ -478,7 +525,7 @@ function handleQuestionAsked(p) {
   v.pendingCard = card;
   setStatus("waiting_user");
   document.title = "❓ Question - CentrAlign Worker";
-  setTimeout(() => answer.focus(), 50);
+  if (mayAnswer) setTimeout(() => answer.focus(), 50);
 }
 
 function handleQuestionAnswered() {
@@ -589,7 +636,7 @@ function handleEvent(ev) {
       setStatus("running");
       $("empty")?.remove();
       append(h("div", { class: "task-card" }, h("div", { class: "label" }, "Task"), h("p", null, p.task),
-        h("div", { class: "muted small" }, `approval mode: ${(p.approval_mode || "").replace(/_/g, " ")}  ·  run ${S.runId}`)));
+        h("div", { class: "muted small" }, `approval mode: ${(p.approval_mode || "").replace(/_/g, " ")}  ·  run ${S.runId.slice(0, 8)}`)));
       break;
     }
     case "thought": handleThought(p); break;
@@ -605,6 +652,7 @@ function handleEvent(ev) {
       noteRow("plan", "plan", `Plan updated: ${done}/${v.plan.length} items done`);
       break;
     }
+    case "run_resumed": noteRow("guard", "resumed", p.message || "Run resumed after an interruption."); break;
     case "tool_started": handleToolStarted(p); break;
     case "tool_finished": handleToolFinished(p); break;
     case "approval_requested": handleApprovalRequested(p); break;
@@ -661,6 +709,7 @@ function connect(runId) {
   const token = ++S.connToken;
   S.runId = runId;
   S.finished = false;
+  loadRunMeta(runId);
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/api/runs/${encodeURIComponent(runId)}/events`);
   S.ws = ws;
@@ -671,8 +720,9 @@ function connect(runId) {
     try { ev = JSON.parse(msg.data); } catch (e) { return; }
     try { handleEvent(ev); } catch (err) { console.error("event render failed", ev, err); }
   };
-  ws.onclose = () => {
+  ws.onclose = async () => {
     if (token !== S.connToken || S.finished) return;
+    if (S.mode === "db" && !(await sessionAlive())) return; // the sign-in screen is shown instead
     setTimeout(() => { if (token === S.connToken && !S.finished) connect(runId); }, 1000);
   };
   highlightHistory();
@@ -696,6 +746,7 @@ async function loadScenarios() {
       class: "chip", type: "button", title: s.task,
       onclick: () => {
         $("task").value = s.task;
+        if (!canAdminEnv()) return; // only admins can change the environment's chaos flags
         setChaos(s.chaos);
         if (s.chaos && s.chaos.length) toast(`Chaos flags set: ${s.chaos.join(", ")}`, "ok");
       },
@@ -706,6 +757,8 @@ async function loadScenarios() {
 }
 
 let chaosLoaded = false;
+const canAdminEnv = () => S.mode !== "db" || !!(S.me && S.me.capabilities.admin);
+
 async function loadChaos() {
   try {
     const data = await api("GET", "/api/sim/chaos");
@@ -716,13 +769,17 @@ async function loadChaos() {
       h("input", { type: "checkbox", value: name, checked: first ? flags[name] : keep.has(name) }),
       h("span", null, h("span", { class: "chaos-name" }, name), h("span", { class: "chaos-desc" }, (data.descriptions || {})[name] || "")))));
     chaosLoaded = true;
+    if (!canAdminEnv()) document.querySelectorAll("#chaos input").forEach((c) => (c.disabled = true));
   } catch (err) {
-    if (!chaosLoaded) $("chaos").replaceChildren(h("span", { class: "muted small" }, "Environment not reachable. Start it with `python -m company_sim`."));
+    if (!chaosLoaded) {
+      $("chaos").replaceChildren(h("span", { class: "muted small" },
+        S.mode === "db" && /environment/i.test(err.message) ? err.message : "Environment not reachable. Start it with `python -m company_sim`."));
+    }
   }
 }
 
 async function resetEnvironment(quiet) {
-  const res = await api("POST", "/api/sim/reset", { chaos: selectedChaos() });
+  const res = await api("POST", S.mode === "db" ? "/api/admin/environment/reset" : "/api/sim/reset", { chaos: selectedChaos() });
   if (!quiet) toast(`Environment reset${res.chaos && res.chaos.length ? ` (chaos: ${res.chaos.join(", ")})` : ""}`, "ok");
   return res;
 }
@@ -732,22 +789,30 @@ function updateRunButtons() {
   $("run-btn").disabled = busy;
   $("cancel-btn").disabled = !busy;
   $("reset-btn").disabled = busy;
+  if (S.mode === "db" && S.me) {
+    const mayRun = S.me.capabilities.start_runs;
+    $("run-btn").classList.toggle("hidden", !mayRun);
+    $("cancel-btn").classList.toggle("hidden", !mayRun);
+  }
 }
 
 async function startRun() {
   const task = $("task").value.trim();
   if (!task) { toast("Describe a task first, or pick an example.", "error"); $("task").focus(); return; }
   if (S.config && S.config.runs_left_today === 0) {
-    toast(`Daily demo limit reached (${S.config.max_runs_per_day} runs per day, UTC). Please try again tomorrow.`, "error");
+    toast(S.mode === "db"
+      ? `Your organization reached its daily limit (${S.config.max_runs_per_day} runs per day, UTC). An admin can raise it in Admin > Organization settings.`
+      : `Daily demo limit reached (${S.config.max_runs_per_day} runs per day, UTC). Please try again tomorrow.`, "error");
     return;
   }
   $("run-btn").disabled = true;
   try {
-    if ($("reset-before").checked) await resetEnvironment(true);
+    if ($("reset-before").checked && canAdminEnv()) await resetEnvironment(true);
     const res = await api("POST", "/api/runs", {
       task, approval_mode: $("approval-mode").value, headed: $("headed").checked,
     });
     S.activeRunId = res.run_id;
+    S.runMeta = { id: res.run_id, started_by: res.started_by || null };
     updateRunButtons();
     S.view = S.view || freshView();
     connect(res.run_id);
@@ -779,15 +844,18 @@ function relTime(iso) {
 }
 
 async function refreshHistory() {
+  if (S.mode === "db" && !S.signedIn) return;
   try {
     const runs = await api("GET", "/api/runs");
+    runs.forEach((r) => S.runIndex.set(r.id, r));
     const list = $("history");
     if (!runs.length) { list.replaceChildren(h("li", { class: "muted small" }, "No runs yet.")); return; }
     list.replaceChildren(...runs.slice(0, 40).map((r) => h("li", null,
       h("button", { class: `history-item ${r.id === S.runId ? "selected" : ""}`, type: "button", "data-run": r.id, onclick: () => loadRun(r.id) },
         h("span", { class: `dot dot-h-${r.status}` }),
         h("span", null, h("span", { class: "history-task" }, r.task || "(no task)"),
-          h("span", { class: "history-meta" }, `${STATUS_LABEL[r.status] || r.status} · ${relTime(r.started_at)}`))))));
+          h("span", { class: "history-meta" }, `${STATUS_LABEL[r.status] || r.status} · ${relTime(r.started_at)}`
+            + (r.started_by ? ` · by ${r.started_by.name || r.started_by.email}` : "")))))));
   } catch (err) { /* server may be restarting */ }
 }
 
@@ -807,11 +875,13 @@ function applyConfig(cfg) {
   S.config = cfg;
   $("headed-switch").classList.toggle("hidden", !!cfg.deploy_mode);
   if (cfg.deploy_mode) $("headed").checked = false;
-  $("company-link").classList.toggle("hidden", !cfg.sim_proxy);
-  $("logout-link").classList.toggle("hidden", !cfg.auth_enabled);
+  $("company-link").classList.toggle("hidden", !cfg.sim_proxy || (S.mode === "db" && !(S.me && S.me.capabilities.start_runs)));
+  if (S.mode === "db") $("company-link").setAttribute("href", "/api/environment/enter");
+  $("logout-link").classList.toggle("hidden", !cfg.auth_enabled || S.mode === "db");
 }
 
 async function pollHealth() {
+  if (S.mode === "db" && !S.signedIn) return;
   try {
     const hl = await api("GET", "/api/health");
     $("model-badge").dataset.provider = hl.provider;
@@ -856,7 +926,168 @@ function initScrolling() {
   });
 }
 
+/* ------------------------------------------------------------------ multi-user mode: sign-in, header, roles */
+
+// File mode (v1) answers /api/auth/me with 404 or {mode: "file"}; database mode with the profile or 401.
+async function detectMode() {
+  try {
+    const resp = await fetch("/api/auth/me");
+    if (resp.status === 404) return { mode: "file" };
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.mode === "db") return { mode: "db", me: data };
+    if (resp.status === 401 && data.detail === "Not signed in") return { mode: "db", me: null };
+  } catch (err) { /* offline: behave like v1 and let the health poll show it */ }
+  return { mode: "file" };
+}
+
+async function sessionAlive() {
+  try {
+    const resp = await fetch("/api/auth/me");
+    if (resp.ok) return true;
+    if (resp.status === 401) showLogin("Your session has ended. Please sign in again.");
+  } catch (err) { return true; /* network trouble: keep trying */ }
+  return false;
+}
+
+function showLogin(message) {
+  S.signedIn = false;
+  document.body.classList.add("signed-out");
+  if (S.ws) { S.ws.onclose = null; S.ws.onmessage = null; try { S.ws.close(); } catch (e) { /* ignore */ } S.ws = null; }
+  $("login-screen").classList.remove("hidden");
+  $("user-box").classList.add("hidden");
+  $("main-nav").classList.add("hidden");
+  setLoginError(message || "");
+  $("login-password").value = "";
+  setTimeout(() => ($("login-email").value ? $("login-password") : $("login-email")).focus(), 30);
+}
+
+function setLoginError(message) {
+  const box = $("login-error");
+  box.textContent = message;
+  box.classList.toggle("hidden", !message);
+}
+
+async function submitLogin(ev) {
+  ev.preventDefault();
+  const button = $("login-submit");
+  button.disabled = true;
+  setLoginError("");
+  try {
+    const resp = await fetch("/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: $("login-email").value.trim(), password: $("login-password").value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      setLoginError(typeof data.detail === "string" ? data.detail : "Sign-in failed.");
+      $("login-password").value = "";
+      $("login-password").focus();
+      return;
+    }
+    $("login-password").value = "";
+    enterApp(data);
+  } catch (err) {
+    setLoginError("Could not reach the server. Check your connection and try again.");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function enterApp(me) {
+  S.me = me;
+  S.signedIn = true;
+  document.body.classList.remove("signed-out");
+  $("login-screen").classList.add("hidden");
+  S.runId = null;
+  S.runMeta = null;
+  chaosLoaded = false;
+  showView("dashboard");
+  resetView();
+  applyMe();
+  startApp();
+}
+
+function applyMe() {
+  const me = S.me, caps = me.capabilities, org = me.org;
+  $("user-box").classList.remove("hidden");
+  $("user-name").textContent = me.user.name;
+  $("role-badge").textContent = org.role;
+  $("role-badge").className = `role-badge role-${org.role}`;
+  const sw = $("org-switch");
+  sw.classList.toggle("hidden", me.orgs.length < 2);
+  $("org-name").classList.toggle("hidden", me.orgs.length > 1);
+  $("org-name").textContent = org.name;
+  sw.replaceChildren(...me.orgs.map((o) => h("option", { value: o.id, selected: o.id === org.id }, `${o.name} (${o.role})`)));
+  $("main-nav").classList.remove("hidden");
+  document.querySelectorAll(".nav-btn[data-view=admin], .nav-btn[data-view=credentials]").forEach((b) => b.classList.toggle("hidden", !caps.admin));
+  $("logout-link").classList.add("hidden");
+  $("task").readOnly = !caps.start_runs;
+  $("headed-switch").classList.add("hidden");
+  $("reset-btn").classList.toggle("hidden", !caps.admin);
+  $("reset-before").closest("label").classList.toggle("hidden", !caps.admin);
+  const note = $("access-note");
+  let text = "";
+  if (!caps.start_runs) text = `You have read-only access (${org.role}). You can watch runs${caps.approve ? " and answer approvals" : ""} but not start them.`;
+  else if (!org.environment_ready) text = "This organization has no simulated company yet. An admin must provision it under Admin > Environment before runs can start.";
+  note.textContent = text;
+  note.classList.toggle("hidden", !text);
+  updateRunButtons();
+}
+
+async function switchOrg(orgId) {
+  try {
+    await api("POST", "/api/auth/switch-org", { org_id: orgId });
+    location.reload(); // the simplest way to drop every bit of state of the previous organization
+  } catch (err) {
+    toast(err.message, "error");
+    applyMe();
+  }
+}
+
+async function signOut() {
+  try { await fetch("/api/auth/logout", { method: "POST" }); } catch (err) { /* cleared server-side when reachable */ }
+  S.me = null;
+  S.runId = null;
+  S.runMeta = null;
+  S.runIndex.clear();
+  resetView();
+  $("history").replaceChildren(h("li", { class: "muted small" }, "No runs yet."));
+  showLogin("");
+}
+
+// Which run is on screen, and who started it (the approval card needs the starter for separation of duties).
+async function loadRunMeta(runId) {
+  S.runMeta = S.runIndex.get(runId) || (S.runMeta && S.runMeta.id === runId ? S.runMeta : null);
+  if (S.mode !== "db") return;
+  if (!S.runMeta || !S.runMeta.started_by) {
+    try {
+      const data = await api("GET", `/api/runs/${encodeURIComponent(runId)}`);
+      if (S.runId === runId) S.runMeta = { id: runId, started_by: data.started_by };
+    } catch (err) { return; }
+  }
+  if (S.view && S.view.gate) S.view.gate();
+}
+
+function showView(name) {
+  const views = { dashboard: "view-dashboard", admin: "view-admin", credentials: "view-credentials" };
+  Object.entries(views).forEach(([key, id]) => $(id).classList.toggle("hidden", key !== name));
+  document.querySelectorAll(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
+  if (name === "admin" && window.loadAdminPage) window.loadAdminPage();
+  if (name === "credentials" && window.loadCredentialsPage) window.loadCredentialsPage();
+}
+
 /* ------------------------------------------------------------------ boot */
+
+function startApp() {
+  loadScenarios();
+  refreshHistory();
+  pollHealth();
+  if (S.started) return; // the timers below run once, across sign-outs and sign-ins
+  S.started = true;
+  setInterval(pollHealth, 4000);
+  setInterval(tickTimer, 1000);
+  setInterval(refreshHistory, 15000);
+}
 
 function init() {
   resetView();
@@ -873,13 +1104,19 @@ function init() {
   $("lightbox").addEventListener("click", (e) => { if (e.target.id !== "lightbox-img") closeLightbox(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLightbox(); });
   $("task").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) startRun(); });
-  loadScenarios();
-  refreshHistory();
-  pollHealth();
-  setInterval(pollHealth, 4000);
-  setInterval(tickTimer, 1000);
-  setInterval(refreshHistory, 15000);
+  $("login-form").addEventListener("submit", submitLogin);
+  $("logout-btn").addEventListener("click", signOut);
+  $("org-switch").addEventListener("change", (e) => switchOrg(e.target.value));
+  document.querySelectorAll(".nav-btn").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
   updateRunButtons();
 }
 
-document.addEventListener("DOMContentLoaded", init);
+async function boot() {
+  init();
+  const detected = await detectMode();
+  S.mode = detected.mode;
+  if (S.mode === "file") { startApp(); return; }
+  if (detected.me) enterApp(detected.me); else showLogin("");
+}
+
+document.addEventListener("DOMContentLoaded", boot);

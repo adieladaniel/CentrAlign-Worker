@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
+import random
 import sys
 from datetime import date, datetime, time, timedelta
 
-from . import chaos, config, db
+from . import chaos, config, db, tenants
 from .pdfgen import generate_invoice_pdf, totals
 
 VENDORS = [
@@ -26,8 +27,12 @@ def month_end(d: date) -> date:
     return ((d.replace(day=28) + timedelta(days=4)).replace(day=1)) - timedelta(days=1)
 
 
-def invoice_specs(today: date, flags: set[str]) -> list[dict]:
-    """Portal invoices in internal-id order (deliberately not date order)."""
+def invoice_specs(today: date, flags: set[str], salt: str = "") -> list[dict]:
+    """Portal invoices in internal-id order (deliberately not date order).
+
+    A non-empty ``salt`` (one per tenant) nudges every unit price by up to +-8%, deterministically, so tenants hold
+    different amounts. Vendors, invoice numbers and dates stay the same, so the tasks read the same in every tenant.
+    """
     ago = lambda n: today - timedelta(days=n)  # noqa: E731
     this_month_due = lambda k: max(month_end(today) - timedelta(days=k), today.replace(day=1))  # noqa: E731
 
@@ -76,6 +81,10 @@ def invoice_specs(today: date, flags: set[str]) -> list[dict]:
         specs.append(spec("Company X Holdings", f"CXH-{cx_latest_issue.year}-0077", cx_latest_issue,
                           cx_latest_issue + timedelta(days=30), "open", "EUR",
                           [("Corporate advisory services", 1, 1950.00), ("Travel expenses", 1, 360.00)]))
+    if salt:
+        for s in specs:
+            jitter = random.Random(f"{salt}:{s['number']}")
+            s["items"] = [(d, q, round(p * (1 + jitter.uniform(-0.08, 0.08)), 2)) for d, q, p in s["items"]]
     return specs
 
 
@@ -119,14 +128,15 @@ def email_specs(today: date, latest_cx: str) -> list[dict]:
 
 
 def seed_database(flags: set[str] | None = None) -> dict:
-    """Wipe and reseed the database and PDFs. Returns a short summary."""
+    """Wipe and reseed the current tenant's database and PDFs. Returns a short summary."""
     flags = chaos.active() if flags is None else set(flags)
     today = config.SIM_TODAY
-    specs = invoice_specs(today, flags)
+    specs = invoice_specs(today, flags, tenants.current().seed_salt)
     vendors = {v[1]: v for v in VENDORS}
 
-    config.PDF_DIR.mkdir(parents=True, exist_ok=True)
-    for old in config.PDF_DIR.glob("*.pdf"):
+    pdf_dir = tenants.pdf_dir()
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    for old in pdf_dir.glob("*.pdf"):
         old.unlink()
 
     with db.transaction() as conn:
@@ -149,7 +159,7 @@ def seed_database(flags: set[str] | None = None) -> dict:
             )
             v = vendors[s["vendor"]]
             generate_invoice_pdf(
-                config.PDF_DIR / f"{s['number']}.pdf", vendor_name=v[1], vendor_address=v[3], number=s["number"],
+                pdf_dir / f"{s['number']}.pdf", vendor_name=v[1], vendor_address=v[3], number=s["number"],
                 issue=s["issue"], due=s["due"], currency=s["currency"], tax_rate=TAX_BY_CURRENCY[s["currency"]],
                 items=s["items"],
             )
@@ -182,23 +192,29 @@ def seed_database(flags: set[str] | None = None) -> dict:
     return {"flags": sorted(flags), "invoices": len(specs), "latest_company_x": cx_latest["number"]}
 
 
-def write_workspace(overwrite: bool = True) -> None:
-    """Write workspace/credentials.json and README.txt for the agent to discover."""
-    config.WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-    creds = {
-        "mail": {"url": f"{config.BASE_URL}/mail", "username": config.MAIL_USER, "password": config.MAIL_PASSWORD,
+def workspace_files(creds: dict, base_url: str) -> dict[str, str]:
+    """File name -> content of the shared drive for one tenant's credentials (``Tenant.credentials`` layout)."""
+    mail, portal, erp = creds["mail"], creds["portal"], creds["erp"]
+    doc = {
+        "mail": {"url": f"{base_url}/mail", "username": mail["username"], "password": mail["password"],
                  "description": "Shared AP mailbox"},
-        "vendor_portal": {"url": f"{config.BASE_URL}/portal", "username": config.PORTAL_USER,
-                          "password": config.PORTAL_PASSWORD, "description": "Supplier billing portal (vendor invoices)"},
-        "erp": {"url": f"{config.BASE_URL}/erp", "username": config.ERP_USER, "password": config.ERP_PASSWORD,
-                "api_base_url": f"{config.BASE_URL}/erp/api", "api_key_header": "X-API-Key",
-                "api_key": config.ERP_API_KEY, "description": "Ledger: internal accounting system (AP bills)"},
+        "vendor_portal": {"url": f"{base_url}/portal", "username": portal["username"],
+                          "password": portal["password"], "description": "Supplier billing portal (vendor invoices)"},
+        "erp": {"url": f"{base_url}/erp", "username": erp["username"], "password": erp["password"],
+                "api_base_url": f"{base_url}/erp/api", "api_key_header": "X-API-Key",
+                "api_key": creds["erp_api_key"], "description": "Ledger: internal accounting system (AP bills)"},
     }
-    files = {
-        "credentials.json": json.dumps(creds, indent=2) + "\n",
+    return {
+        "credentials.json": json.dumps(doc, indent=2) + "\n",
         "README.txt": "Company shared drive. credentials.json has system logins.\n",
     }
-    for name, content in files.items():
+
+
+def write_workspace(overwrite: bool = True) -> None:
+    """Write workspace/credentials.json and README.txt for the agent to discover (default tenant only: other
+    tenants' credentials come from the provisioning API and never go into the shared workspace)."""
+    config.WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    for name, content in workspace_files(tenants.default_tenant().credentials, config.BASE_URL).items():
         path = config.WORKSPACE_DIR / name
         if overwrite or not path.exists():
             path.write_text(content, encoding="utf-8")

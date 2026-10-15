@@ -6,7 +6,7 @@ import math
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from .. import config, db
+from .. import config, db, tenants
 from ..auth import portal_auth
 from .common import add_login_routes, redirect, render
 
@@ -65,7 +65,7 @@ async def invoice_detail(number: str, request: Request, _: dict = Depends(user))
 @router.get("/invoices/{number}/pdf")
 async def invoice_pdf(number: str, _: dict = Depends(user)):
     inv = _visible_invoice(number)
-    path = config.PDF_DIR / f"{inv['number']}.pdf"
+    path = tenants.pdf_dir() / f"{inv['number']}.pdf"
     if not path.exists():
         raise HTTPException(404, "PDF not found")
     return FileResponse(path, media_type="application/pdf", filename=f"{inv['number']}.pdf")

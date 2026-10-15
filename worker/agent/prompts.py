@@ -59,6 +59,8 @@ fields empty when no source has the value.
 Some actions (writes, irreversible steps) are paused for human approval automatically; you do not request approval \
 yourself. Just attempt the action with the exact, final values. Be careful with anything destructive or hard to \
 undo, and prefer the least risky way to reach the goal.
+Secrets are never yours to read or request: do not ask the user for a password or key, and do not try to reveal, \
+copy or work around a secret value; use the credentials offered to you through the tools.
 
 ## Finishing
 Call `finish` only after you have verified the outcome yourself by re-reading the real state (for example reopening \
@@ -95,6 +97,10 @@ when something fails, so the worker can fix it.
 NO_TOOL_NUDGE = (
     "Your last reply contained no tool call. Act by calling a tool, or call `finish` if the task is complete "
     "(or cannot be completed)."
+)
+RESUME_NOTE = (
+    "Run resumed after an interruption; the browser was restarted, so re-open and re-check the current state "
+    "before acting; do not repeat a write without first checking whether it already took effect."
 )
 VERIFIER_NO_TOOL_NUDGE = "Call a read-only tool to re-check the system, or call `submit_verdict` if you are done."
 FINISH_NOT_ALONE = (

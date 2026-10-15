@@ -26,6 +26,17 @@ class ApprovalPolicy:
         self.mode = mode
         self._approved_similar: set[tuple[str, Risk]] = set()
 
+    def to_dict(self) -> dict:
+        """Serializable form (mode and the "approve similar" cache), for resuming a run."""
+        return {"mode": self.mode, "approved_similar": sorted([name, risk.value] for name, risk in self._approved_similar)}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ApprovalPolicy:
+        """Rebuild from ``to_dict`` output."""
+        policy = cls(data.get("mode", "confirm_writes"))
+        policy._approved_similar = {(name, Risk(risk)) for name, risk in data.get("approved_similar", [])}
+        return policy
+
     def needs_approval(self, tool: Tool, args: dict, risk: Risk) -> bool:
         """True when the call must be approved before it executes."""
         if tool.name in INTERNAL_TOOLS:

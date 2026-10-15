@@ -25,9 +25,9 @@ def is_transient_exception(exc: BaseException) -> bool:
     return bool(_TRANSIENT_PATTERN.search(str(exc)))
 
 
-def _retry_safe(tool: Tool, args: dict) -> bool:
+def _retry_safe(tool: Tool, args: dict, ctx: ToolContext) -> bool:
     try:
-        return tool.retry_safe(args)
+        return tool.retry_safe(args, ctx)
     except Exception:  # noqa: BLE001 - when in doubt, do not retry
         return False
 
@@ -49,12 +49,23 @@ async def _run_once(tool: Tool, args: dict, ctx: ToolContext) -> ToolResult:
 
 async def execute_with_retry(tool: Tool, args: dict, ctx: ToolContext) -> ToolResult:
     """Run ``tool`` and never raise. Transient failures are retried up to ``tool.max_retries`` times
-    with exponential backoff; the final observation notes how many retries happened."""
+    with exponential backoff; the final observation notes how many retries happened.
+
+    If the run has a redactor (``ctx.extras["redactor"]``, set when vault credentials are in scope), every result is
+    scrubbed of secret values here, so neither the worker's nor the auditor's conversation can receive one."""
+    result = await _execute_with_retry(tool, args, ctx)
+    redactor = ctx.extras.get("redactor")
+    return redactor.redact_result(result) if redactor else result
+
+
+async def _execute_with_retry(tool: Tool, args: dict, ctx: ToolContext) -> ToolResult:
     retries = 0
+    # Decided before the call: running it may change the state (e.g. the page) the answer depends on.
+    retry_safe = _retry_safe(tool, args, ctx)
     result = await _run_once(tool, args, ctx)
     # State-changing calls are never retried blindly: a failure (timeout, 5xx, dropped connection) may have
     # happened after a partial write. The failure is returned as non-transient with guidance for the agent.
-    if not result.ok and result.transient and not _retry_safe(tool, args):
+    if not result.ok and result.transient and not retry_safe:
         result.transient = False
         note = tool.no_retry_note(args)
         if note not in result.observation:

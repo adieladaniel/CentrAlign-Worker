@@ -30,12 +30,17 @@ class HttpRequestTool(Tool):
             "headers": {"type": "object", "description": "Optional request headers."},
             "json_body": {"type": "object", "description": "Optional JSON request body."},
             "query": {"type": "object", "description": "Optional query-string parameters."},
+            "auth_credential": {
+                "type": "string",
+                "description": "Optional name of a vault credential (see list_credentials). Its authentication header "
+                               "is added for you; you never see the value.",
+            },
         },
         "required": ["method", "url"],
     }
     risk = Risk.WRITE
 
-    def classify(self, args: dict) -> Risk:
+    def classify(self, args: dict, ctx: ToolContext) -> Risk:
         method = str(args.get("method", "GET")).upper()
         if method in ("GET", "HEAD"):
             return Risk.READ
@@ -43,7 +48,7 @@ class HttpRequestTool(Tool):
             return Risk.IRREVERSIBLE
         return Risk.WRITE
 
-    def retry_safe(self, args: dict) -> bool:
+    def retry_safe(self, args: dict, ctx: ToolContext) -> bool:
         return str(args.get("method", "GET")).upper() in IDEMPOTENT_METHODS
 
     def no_retry_note(self, args: dict) -> str:
@@ -52,9 +57,10 @@ class HttpRequestTool(Tool):
             "have happened: check whether the record exists (GET) before retrying."
         )
 
-    def describe_action(self, args: dict) -> str:
+    def describe_action(self, args: dict, ctx: ToolContext | None = None) -> str:
         body = f" with body {json.dumps(args['json_body'], ensure_ascii=False)}" if args.get("json_body") else ""
-        return f"{str(args.get('method', 'GET')).upper()} {args.get('url')}{body}"
+        auth = f" using credential {args['auth_credential']}" if args.get("auth_credential") else ""
+        return f"{str(args.get('method', 'GET')).upper()} {args.get('url')}{body}{auth}"
 
     async def run(self, args: dict, ctx: ToolContext) -> ToolResult:
         method = str(args["method"]).upper()
@@ -75,9 +81,15 @@ class HttpRequestTool(Tool):
                 error="read_only_mode",
             )
 
+        headers = dict(args.get("headers") or {})
+        if args.get("auth_credential"):
+            refusal = self._add_credential_header(headers, str(args["auth_credential"]), host, ctx)
+            if refusal is not None:
+                return refusal
+
         async with httpx.AsyncClient(timeout=TIMEOUT_S, follow_redirects=False) as client:
             resp = await client.request(
-                method, url, headers=args.get("headers") or None, json=args.get("json_body"), params=args.get("query") or None
+                method, url, headers=headers or None, json=args.get("json_body"), params=args.get("query") or None
             )
 
         body = self._format_body(resp)
@@ -95,6 +107,33 @@ class HttpRequestTool(Tool):
         if resp.status_code >= 400:
             return ToolResult(ok=False, observation=observation, error=f"HTTP {resp.status_code}", data=data)
         return ToolResult(ok=True, observation=observation, data=data)
+
+    @staticmethod
+    def _add_credential_header(headers: dict, name: str, host: str, ctx: ToolContext) -> ToolResult | None:
+        """Put the vault credential's header into ``headers`` (replacing any the model set), or explain the refusal.
+
+        The value is read here, at execution time, and never appears in an observation. A credential with a host hint
+        is only sent to that host, even when the allowlist permits others."""
+        scope = ctx.extras.get("vault_scope")
+        credential = scope.get(name) if scope else None
+        if credential is None:
+            available = ", ".join(scope.names()) if scope else ""
+            hint = f"Available: {available}." if available else "The vault has no credentials for this run."
+            return ToolResult(ok=False, observation=f"No credential named '{name}' in the vault. {hint}",
+                              error="unknown_credential")
+        if not credential.allows_host(host):
+            return ToolResult(
+                ok=False, error="credential_host_mismatch",
+                observation=f"Credential '{name}' is only for {credential.host}; it will not be sent to {host}.",
+            )
+        header = credential.auth_header()
+        if header is None:
+            return ToolResult(ok=False, observation=f"Credential '{name}' ({credential.kind}) has no authentication "
+                              "header to send.", error="credential_unusable")
+        for existing in [k for k in headers if k.lower() == header[0].lower()]:
+            del headers[existing]
+        headers[header[0]] = header[1]
+        return None
 
     @staticmethod
     def _format_body(resp: httpx.Response) -> str:

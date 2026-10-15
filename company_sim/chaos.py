@@ -1,9 +1,12 @@
-"""Global, controllable "chaos" configuration used for reliability testing."""
+"""Controllable "chaos" configuration used for reliability testing. Flags and one-time counters are per tenant."""
 from __future__ import annotations
 
 import os
 import threading
+from dataclasses import dataclass, field
 from typing import Iterable
+
+from . import tenants
 
 FLAGS: dict[str, str] = {
     "erp_submit_500_once": "First POST of the ERP new-bill form (and first ERP API POST) returns HTTP 500, then works.",
@@ -17,11 +20,18 @@ FLAGS: dict[str, str] = {
 DATA_FLAGS = {"duplicate_bill", "ambiguous_vendor", "portal_missing_invoice"}
 
 _lock = threading.Lock()
-_active: set[str] = set()
-_used_once: set[str] = set()
 
 
-def _validate(names: Iterable[str]) -> set[str]:
+@dataclass
+class _State:
+    active: set[str] = field(default_factory=set)
+    used_once: set[str] = field(default_factory=set)
+
+
+_states: dict[str, _State] = {}  # tenant id -> state; the current tenant selects which one every function uses
+
+
+def validate(names: Iterable[str]) -> set[str]:
     names = {n.strip() for n in names if n and n.strip()}
     unknown = names - set(FLAGS)
     if unknown:
@@ -29,64 +39,91 @@ def _validate(names: Iterable[str]) -> set[str]:
     return names
 
 
+def _state() -> _State:
+    """State of the current tenant (caller holds ``_lock``). A tenant's flags are restored from the index on first use."""
+    tid = tenants.current_tenant.get()
+    state = _states.get(tid)
+    if state is None:
+        tenant = tenants.get_tenant(tid) if tid != tenants.DEFAULT else None
+        state = _states[tid] = _State(active=set(tenant.chaos) if tenant else set())
+    return state
+
+
+def _persist(active: set[str]) -> None:
+    tenants.save_chaos(tenants.current_tenant.get(), active)
+
+
+def forget(tenant_id: str) -> None:
+    """Drop the in-memory state of a tenant (it was deleted or re-created)."""
+    with _lock:
+        _states.pop(tenant_id, None)
+
+
 def load_from_env() -> None:
-    """Load flags from the SIM_CHAOS env var (comma separated), if set."""
+    """Load flags from the SIM_CHAOS env var (comma separated), if set. Applies to the default tenant."""
     raw = os.environ.get("SIM_CHAOS")
     if raw is not None:
         set_flags(raw.split(","))
 
 
 def active() -> set[str]:
-    """Return a copy of the currently active flags."""
+    """Return a copy of the current tenant's active flags."""
     with _lock:
-        return set(_active)
+        return set(_state().active)
 
 
 def is_on(flag: str) -> bool:
     with _lock:
-        return flag in _active
+        return flag in _state().active
 
 
 def set_flags(names: Iterable[str]) -> set[str]:
     """Replace the active flag set. Resets one-time counters."""
-    names = _validate(names)
+    names = validate(names)
     with _lock:
-        _active.clear()
-        _active.update(names)
-        _used_once.clear()
+        state = _state()
+        state.active = set(names)
+        state.used_once.clear()
+        current = set(state.active)
+    _persist(current)
     return names
 
 
 def update_flags(changes: dict[str, bool]) -> set[str]:
     """Turn individual flags on/off. Resets one-time counters."""
-    _validate(changes)
+    validate(changes)
     with _lock:
+        state = _state()
         for name, on in changes.items():
-            (_active.add if on else _active.discard)(name)
-        _used_once.clear()
-        return set(_active)
+            (state.active.add if on else state.active.discard)(name)
+        state.used_once.clear()
+        current = set(state.active)
+    _persist(current)
+    return current
 
 
 def reset_counters() -> None:
     with _lock:
-        _used_once.clear()
+        _state().used_once.clear()
 
 
 def consume_once(key: str) -> bool:
     """Return True the first time `key` is consumed (until counters reset)."""
     with _lock:
-        if key in _used_once:
+        used = _state().used_once
+        if key in used:
             return False
-        _used_once.add(key)
+        used.add(key)
         return True
 
 
 def snapshot() -> dict:
     """JSON-friendly view of the chaos state."""
     with _lock:
+        state = _state()
         return {
-            "flags": {name: name in _active for name in FLAGS},
-            "active": sorted(_active),
-            "one_time_used": sorted(_used_once),
+            "flags": {name: name in state.active for name in FLAGS},
+            "active": sorted(state.active),
+            "one_time_used": sorted(state.used_once),
             "descriptions": FLAGS,
         }

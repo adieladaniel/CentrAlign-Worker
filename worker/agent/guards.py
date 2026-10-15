@@ -2,6 +2,9 @@
 
 Soft problems (failure streaks, repeated actions) are handled in two stages: a one-time nudge to the
 agent, then escalation to the human. Hard limits (budget, timeout) stop the run.
+
+The wall-clock limit counts *active* time only: the runner pauses the clock while it waits for a human, and the
+accumulated active time is part of the saved state, so it carries over when a run is resumed.
 """
 from __future__ import annotations
 
@@ -56,11 +59,55 @@ class Guards:
         self.soft_failures = min(self.hard_failures, max(2, math.ceil(self.hard_failures / 2)))
         self.timeout_s = timeout_s
         self._clock = clock
-        self._started = clock()
+        self._active_s = 0.0  # active time accumulated before the current stretch
+        self._since: float | None = clock()  # start of the current stretch; None while paused
         self._failures = 0
         self._failure_nudged = False
         self._repeat_nudged = False
         self._recent: deque[tuple[str, str]] = deque(maxlen=REPEAT_WINDOW)
+
+    @property
+    def active_seconds(self) -> float:
+        """Run time so far, excluding paused stretches (waiting for a human)."""
+        return self._active_s + (0.0 if self._since is None else self._clock() - self._since)
+
+    def pause_clock(self) -> None:
+        """Stop counting wall-clock time (the run is waiting for a human)."""
+        if self._since is not None:
+            self._active_s, self._since = self.active_seconds, None
+
+    def resume_clock(self) -> None:
+        """Start counting wall-clock time again."""
+        if self._since is None:
+            self._since = self._clock()
+
+    def to_dict(self) -> dict:
+        """Serializable counters, for resuming a run. The clock itself is not saved, only the active time."""
+        return {
+            "active_seconds": self.active_seconds,
+            "failures": self._failures,
+            "failure_nudged": self._failure_nudged,
+            "repeat_nudged": self._repeat_nudged,
+            "recent": [list(item) for item in self._recent],
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict,
+        max_steps: int,
+        max_consecutive_failures: int,
+        timeout_s: float,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> Guards:
+        """Rebuild guards from ``to_dict`` output; limits come from the current settings. The clock is running."""
+        guards = cls(max_steps, max_consecutive_failures, timeout_s, clock)
+        guards._active_s = float(data.get("active_seconds", 0.0))
+        guards._failures = int(data.get("failures", 0))
+        guards._failure_nudged = bool(data.get("failure_nudged", False))
+        guards._repeat_nudged = bool(data.get("repeat_nudged", False))
+        guards._recent.extend((sig, digest) for sig, digest in data.get("recent", []))
+        return guards
 
     def record(self, step: Step) -> None:
         """Feed a finished tool step. Denials, skipped calls and rejected finishes are not malfunctions, so they don't count as failures."""
@@ -75,7 +122,7 @@ class Guards:
 
     def check_limits(self, work_steps: int, total_steps: int) -> GuardEvent | None:
         """Hard stops: step budget and wall-clock timeout."""
-        if self._clock() - self._started > self.timeout_s:
+        if self.active_seconds > self.timeout_s:
             return GuardEvent("timeout", "stop", f"Run exceeded the time limit of {self.timeout_s:.0f}s.")
         if work_steps >= self.max_steps or total_steps >= self.max_steps * TOTAL_STEP_FACTOR:
             return GuardEvent("budget", "stop", f"Step budget of {self.max_steps} steps exhausted.")

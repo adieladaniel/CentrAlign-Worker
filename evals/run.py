@@ -1,9 +1,14 @@
-"""Evaluation harness: ``python -m evals.run [--only a,b] [--repeat N] [--headed] [--provider gemini|ollama]``.
+"""Evaluation harness: ``python -m evals.run [--only a,b] [--repeat N] [--parallel N] [--headed] [--provider gemini|ollama]``.
 
 For every scenario: reset the sim with the scenario's chaos flags, snapshot the baseline, run the *unchanged* agent
 in-process with scripted approvals and answers, then judge the outcome with a deterministic checker against the sim's
 ground truth (never the agent's own claims, never an LLM). Prints a table, writes ``evals/results/<timestamp>.json``
 and ``evals/results/latest.md``. Exit codes: 0 all passed, 1 some failed, 2 setup problem, 130 interrupted.
+
+By default the scenarios run one after the other on the sim's default tenant. With ``--tenant-per-scenario`` (implied by
+``--parallel N`` > 1) each scenario instead gets its own freshly provisioned tenant: a private copy of the company with
+its own logins and chaos flags, an entry link the agent starts from, and its own workspace folder holding that tenant's
+``credentials.json``. Scenarios then cannot disturb each other, so up to N run concurrently, sharing one browser pool.
 """
 from __future__ import annotations
 
@@ -12,8 +17,10 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime
@@ -24,7 +31,8 @@ import httpx
 
 from evals.checkers import CheckResult, classify_outcome, run_check
 from evals.scenarios import Scenario, ScenarioError, ScriptedHuman, load_scenarios
-from evals.simstate import build_sim_state, fetch_admin_state
+from company_sim.seed import workspace_files
+from evals.simstate import admin_headers, build_sim_state, delete_tenant, fetch_admin_state, provision_tenant
 from worker.agent.broker import AutoBroker
 from worker.agent.runner import AgentRunner
 from worker.agent.toolset import build_registry
@@ -43,7 +51,7 @@ LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 def sim_reachable(base_url: str) -> bool:
     try:
-        return httpx.get(base_url.rstrip("/") + "/admin/chaos", timeout=3.0).status_code == 200
+        return httpx.get(base_url.rstrip("/") + "/admin/chaos", headers=admin_headers(), timeout=3.0).status_code == 200
     except httpx.HTTPError:
         return False
 
@@ -86,14 +94,49 @@ def running_sim(base_url: str):
 
 
 def reset_sim(base_url: str, chaos: list[str]) -> None:
-    resp = httpx.post(base_url.rstrip("/") + "/admin/reset", json={"chaos": chaos}, timeout=60.0)
+    resp = httpx.post(base_url.rstrip("/") + "/admin/reset", json={"chaos": chaos}, headers=admin_headers(), timeout=60.0)
     resp.raise_for_status()
 
 
-async def run_scenario(scenario: Scenario, settings: Settings, base_url: str, repeat: int = 1) -> dict:
-    """Run one scenario end to end and return its result record."""
-    reset_sim(base_url, scenario.chaos)
-    baseline = fetch_admin_state(base_url, fallback_flags=scenario.chaos)
+def tenant_settings(settings: Settings, base_url: str, tenant: dict) -> tuple[Settings, Path]:
+    """Settings for a scenario in its own tenant: start at the tenant's entry link, and use a private workspace folder
+    with that tenant's ``credentials.json`` (the shared workspace keeps only the default tenant's logins)."""
+    workspace = Path(tempfile.mkdtemp(prefix=f"eval-{tenant['tenant_id']}-"))
+    base = base_url.rstrip("/")
+    for name, content in workspace_files(tenant["credentials"], base).items():
+        (workspace / name).write_text(content, encoding="utf-8")
+    update = {"WORKSPACE_DIR": str(workspace), "SIM_ENTRY_URL": base + tenant["entry_path"]}
+    return settings.model_copy(update=update), workspace
+
+
+async def run_scenario(scenario: Scenario, settings: Settings, base_url: str, repeat: int = 1,
+                       per_tenant: bool = False) -> dict:
+    """Run one scenario end to end and return its result record.
+
+    ``per_tenant`` provisions a fresh tenant for it (and drops it afterwards); otherwise the default tenant is reset.
+    """
+    if not per_tenant:
+        return await _run_scenario(scenario, settings, base_url, repeat, None)
+    tenant = await asyncio.to_thread(provision_tenant, base_url, scenario.chaos)
+    scenario_settings, workspace = tenant_settings(settings, base_url, tenant)
+    try:
+        return await _run_scenario(scenario, scenario_settings, base_url, repeat, tenant["tenant_id"])
+    finally:
+        delete_tenant(base_url, tenant["tenant_id"])
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+async def _run_scenario(scenario: Scenario, settings: Settings, base_url: str, repeat: int, tenant_id: str | None) -> dict:
+    def snapshot() -> dict:
+        return fetch_admin_state(base_url, fallback_flags=scenario.chaos, **({"tenant_id": tenant_id} if tenant_id else {}))
+
+    async def snapshot_async() -> dict:
+        # tenants run concurrently: keep the blocking HTTP call off the event loop (the default path stays as it was)
+        return await asyncio.to_thread(snapshot) if tenant_id else snapshot()
+
+    if not tenant_id:
+        reset_sim(base_url, scenario.chaos)
+    baseline = await snapshot_async()
     human = ScriptedHuman(scenario)
     broker = AutoBroker(human)
     run_id = f"eval-{scenario.id[:40]}-{uuid.uuid4().hex[:4]}"
@@ -110,13 +153,14 @@ async def run_scenario(scenario: Scenario, settings: Settings, base_url: str, re
     duration = time.monotonic() - started
     await _close_browser(runner)
 
-    sim = build_sim_state(fetch_admin_state(base_url, fallback_flags=scenario.chaos), baseline)
+    sim = build_sim_state(await snapshot_async(), baseline)
     check: CheckResult = run_check(scenario.checker, state, sim, scenario.params)
     outcome = "error" if error and not check.passed else classify_outcome(state, check)
     report = state.get("final_report") or {}
     stats = report.get("stats") or {}
     return {
         "scenario": scenario.id, "title": scenario.title, "repeat": repeat, "chaos": scenario.chaos, "run_id": run_id,
+        "tenant": tenant_id or "default",
         "agent_status": state.get("status", ""), "outcome": outcome, "passed": check.passed, "score": round(check.score, 3),
         "details": check.details, "agent_summary": report.get("summary", ""),
         "verification": {k: (report.get("verification") or {}).get(k) for k in ("ran", "passed", "inconclusive")},
@@ -210,7 +254,8 @@ def render_markdown(results: list[dict], meta: dict) -> str:
                     f"{r['steps']} | {r['llm_calls']} | {r['tokens']} | {r['retries']} | "
                     f"{r['approvals_approved']}/{r['approvals_requested']} | {r['questions']} | {_model_cell(r)} | {r['duration_s']:.0f}s |")
     lines = [
-        f"### Eval results ({meta['started_at']}, {meta['provider']} / {meta['model']}, sim date {meta.get('sim_today', '?')})", "",
+        f"### Eval results ({meta['started_at']}, {meta['provider']} / {meta['model']}, sim date {meta.get('sim_today', '?')}"
+        + (f", {meta['parallel']} in parallel, one sim tenant per scenario" if meta.get("parallel", 1) > 1 else "") + ")", "",
         "Success is judged by deterministic checks against the simulated company's database, not by the agent's claims "
         "and not by an LLM. `Agent said` is the final status the agent reported; `Ground truth` is the checker's verdict.", "",
         *head, *rows, "",
@@ -249,6 +294,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--only", help="Comma-separated scenario ids to run (default: all).")
     p.add_argument("--list", action="store_true", help="List scenarios and exit.")
     p.add_argument("--repeat", type=int, default=1, help="Run each scenario N times (default 1).")
+    p.add_argument("--parallel", type=int, default=1, metavar="N",
+                   help="Run up to N scenarios at the same time (default 1). Implies --tenant-per-scenario.")
+    p.add_argument("--tenant-per-scenario", action=argparse.BooleanOptionalAction, default=None,
+                   help="Give every scenario its own freshly provisioned sim tenant (default: on when --parallel > 1, "
+                        "else off, which runs sequentially on the default tenant).")
     p.add_argument("--headed", action="store_true", help="Show the browser window.")
     p.add_argument("--provider", choices=["gemini", "ollama"], help="LLM provider (default: LLM_PROVIDER from .env).")
     p.add_argument("--sleep-between", type=float, default=0.0, help="Seconds to wait between runs (free-tier friendly).")
@@ -279,12 +329,20 @@ async def amain(args: argparse.Namespace) -> int:
             print(f"{s.id:26} {s.title}  [chaos: {', '.join(s.chaos) or '-'}]")
         return 0
 
+    parallel = max(1, args.parallel)
+    per_tenant = parallel > 1 if args.tenant_per_scenario is None else args.tenant_per_scenario
+    if parallel > 1 and not per_tenant:
+        print("error: --parallel needs --tenant-per-scenario (concurrent scenarios cannot share one tenant's data).", file=sys.stderr)
+        return 2
     overrides: dict = {"HEADLESS": not args.headed, "APPROVAL_MODE": "confirm_writes"}
+    overrides["BROWSER_MAX_CONTEXTS"] = max(get_settings().BROWSER_MAX_CONTEXTS, parallel)  # one context per concurrent run
     if args.provider:
         overrides["LLM_PROVIDER"] = args.provider
     if args.sim_url:
         overrides["SIM_BASE_URL"] = args.sim_url
     settings = get_settings().model_copy(update=overrides)
+    if settings.SIM_ADMIN_TOKEN:  # the helpers and a sim started below read it from the environment
+        os.environ.setdefault("SIM_ADMIN_TOKEN", settings.SIM_ADMIN_TOKEN)
     if settings.LLM_PROVIDER == "gemini" and not settings.GEMINI_API_KEY:
         print("error: GEMINI_API_KEY is not set. Put it in .env or the environment (free key: https://aistudio.google.com/apikey), "
               "or run with --provider ollama.", file=sys.stderr)
@@ -299,27 +357,40 @@ async def amain(args: argparse.Namespace) -> int:
     now = datetime.now()
     meta = {"started_at": now.strftime("%Y-%m-%d %H:%M"), "started_at_file": now.strftime("%Y%m%d-%H%M%S"),
             "provider": settings.LLM_PROVIDER, "model": model, "sim_url": settings.SIM_BASE_URL,
-            "repeat": args.repeat, "interrupted": False}
-    results: list[dict] = []
+            "repeat": args.repeat, "parallel": parallel, "tenant_per_scenario": per_tenant, "interrupted": False}
+    by_index: dict[int, dict] = {}
     plan = [(s, i) for s in scenarios for i in range(1, max(1, args.repeat) + 1)]
+    slots = asyncio.Semaphore(parallel)
+
+    async def run_one(n: int, scenario: Scenario, i: int) -> None:
+        async with slots:
+            if n > 1 and args.sleep_between > 0:
+                await asyncio.sleep(args.sleep_between)
+            print(f"[evals] ({n}/{len(plan)}) {scenario.id}" + (f" #{i}" if args.repeat > 1 else "") + f" - {scenario.title}")
+            record = await run_scenario(scenario, settings, settings.SIM_BASE_URL, repeat=i, per_tenant=per_tenant)
+            record["show_repeat"] = args.repeat > 1
+            by_index[n] = record
+            who = f"{scenario.id}" + (f" #{i}" if args.repeat > 1 else "") + ": " if parallel > 1 else ""  # results interleave
+            print(f"        -> {who}{OUTCOME_LABEL.get(record['outcome'])} (agent said {record['agent_status']}, "
+                  f"score {record['score']:.2f}, {record['duration_s']:.0f}s)")
+
     try:
         with running_sim(settings.SIM_BASE_URL):
-            for n, (scenario, i) in enumerate(plan, start=1):
-                if n > 1 and args.sleep_between > 0:
-                    await asyncio.sleep(args.sleep_between)
-                print(f"[evals] ({n}/{len(plan)}) {scenario.id}" + (f" #{i}" if args.repeat > 1 else "") + f" - {scenario.title}")
-                record = await run_scenario(scenario, settings, settings.SIM_BASE_URL, repeat=i)
-                record["show_repeat"] = args.repeat > 1
-                results.append(record)
-                print(f"        -> {OUTCOME_LABEL.get(record['outcome'])} (agent said {record['agent_status']}, "
-                      f"score {record['score']:.2f}, {record['duration_s']:.0f}s)")
+            tasks = [asyncio.create_task(run_one(n, scenario, i)) for n, (scenario, i) in enumerate(plan, start=1)]
+            try:
+                await asyncio.gather(*tasks)
+            finally:  # a failure or Ctrl+C stops the others too, and lets them clean up their tenants
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
     except (asyncio.CancelledError, KeyboardInterrupt):
         meta["interrupted"] = True
         print("\n[evals] interrupted; writing partial results")
     except (RuntimeError, httpx.HTTPError) as err:
         print(f"error: {err}", file=sys.stderr)
-        if not results:
+        if not by_index:
             return 2
+    results = [by_index[n] for n in sorted(by_index)]
     if results:
         meta["sim_today"] = results[-1]["sim_today"]
         print("\n" + render_text(results))
@@ -330,9 +401,21 @@ async def amain(args: argparse.Namespace) -> int:
     return 0 if results and all(r["passed"] for r in results) else 1
 
 
+async def _amain_then_close_browsers(args: argparse.Namespace) -> int:
+    try:
+        return await amain(args)
+    finally:  # the scenarios share one Chromium (see worker/tools/browser_pool.py); stop it before the loop ends
+        try:
+            from worker.tools.browser_pool import shutdown_pool
+
+            await shutdown_pool()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main(argv: list[str] | None = None) -> None:
     try:
-        code = asyncio.run(amain(parse_args(argv)))
+        code = asyncio.run(_amain_then_close_browsers(parse_args(argv)))
     except KeyboardInterrupt:
         code = 130
     sys.exit(code)

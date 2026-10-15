@@ -28,9 +28,16 @@ class Settings(BaseSettings):
 
     # Environment
     SIM_BASE_URL: str = "http://localhost:8001"
+    # Where the agent is told to start: a tenant's entry link (<sim>/t/<token>/), which selects that organization's
+    # simulated company. Empty = SIM_BASE_URL (the default tenant). Set per run by evals and the platform.
+    SIM_ENTRY_URL: str = ""
+    SIM_ADMIN_TOKEN: str = ""  # sent as X-Admin-Token to the sim's /admin endpoints (the sim enforces it when its own SIM_ADMIN_TOKEN is set)
     WORKSPACE_DIR: str = "./workspace"
     RUNS_DIR: str = "./runs"
     HEADLESS: bool = True
+    # One shared Chromium per process; each run gets an isolated context from it (see worker/tools/browser_pool.py).
+    BROWSER_MAX_CONTEXTS: int = 8           # simultaneously open run contexts; further runs wait for a free slot
+    BROWSER_ACQUIRE_TIMEOUT_S: float = 60.0  # how long a run waits for a slot before failing with a clear error
 
     # Agent policy and guards
     APPROVAL_MODE: Literal["auto", "confirm_writes", "confirm_all"] = "confirm_writes"
@@ -45,6 +52,26 @@ class Settings(BaseSettings):
     PUBLIC_SIM_PROXY: bool = False  # expose /mail /portal /erp /company through this server (single public port)
     MAX_RUNS_PER_DAY: int = 0       # runs per UTC day, 0 = unlimited
 
+    # Credential vault (see worker/vault.py). Without VAULT_KEY a dev key is generated into VAULT_DIR/.vault_key.
+    VAULT_KEY: str = ""             # Fernet key (urlsafe base64, 32 bytes); required when DEPLOY_MODE is on
+    VAULT_DIR: str = "./.vault"     # where the file-backed vault keeps vault.json
+
+    # PostgreSQL (see worker/db/). Empty = v1 behaviour: file-backed runs and vault, no database.
+    DATABASE_URL: str = ""          # postgresql+asyncpg://user:password@host:5432/centralign (never logged unmasked)
+    DB_POOL_SIZE: int = 10          # connections kept open per process
+    DB_MAX_OVERFLOW: int = 10       # extra connections allowed under load
+    DB_POOL_TIMEOUT_S: float = 30.0  # how long a request waits for a free connection
+
+    # Multi-user mode (see worker/auth.py). "auto" = "db" when DATABASE_URL is set, else "file" (the v1 single shared
+    # password / no auth). Set "file" to ignore DATABASE_URL for sign-in, "db" to insist on it.
+    AUTH_MODE: Literal["auto", "file", "db"] = "auto"
+    SESSION_IDLE_TTL_HOURS: float = 12.0     # a session ends after this long without use (sliding)
+    SESSION_ABSOLUTE_TTL_DAYS: float = 7.0   # ... and at the latest this long after sign-in
+    LOGIN_WINDOW_S: int = 900                # failed-login counting window (fixed buckets)
+    LOGIN_MAX_FAILURES_PER_EMAIL: int = 5    # failures per e-mail address and window before sign-in is blocked
+    LOGIN_MAX_FAILURES_PER_IP: int = 20      # failures per client address and window before sign-in is blocked
+    LOGIN_BACKOFF_BASE_S: float = 0.5        # a failed attempt is answered after base * 2^(failures-1) s (max 8 s)
+
     # Tools
     HTTP_ALLOWED_HOSTS: str = "localhost,127.0.0.1"
 
@@ -52,6 +79,16 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_key(cls, v: object) -> object:
         return v.strip() if isinstance(v, str) else v
+
+    @property
+    def db_auth(self) -> bool:
+        """Are users, sessions and orgs in PostgreSQL (``AUTH_MODE=db``, or ``auto`` with ``DATABASE_URL`` set)?"""
+        return self.AUTH_MODE == "db" or (self.AUTH_MODE == "auto" and bool(self.DATABASE_URL.strip()))
+
+    @property
+    def sim_admin_headers(self) -> dict[str, str]:
+        """Headers for the simulated company's /admin endpoints (empty when no admin token is configured)."""
+        return {"X-Admin-Token": self.SIM_ADMIN_TOKEN} if self.SIM_ADMIN_TOKEN else {}
 
     @property
     def gemini_models(self) -> list[str]:

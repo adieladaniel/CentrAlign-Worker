@@ -1,11 +1,8 @@
-"""Explicit, JSON-serializable run state. Persisted to ``runs/<run_id>/run.json`` after every step."""
+"""Explicit, JSON-serializable run state. Persisted through a ``RunStore`` (see ``worker/store.py``) after every step."""
 from __future__ import annotations
 
-import json
-import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Literal
 
 PlanStatus = Literal["pending", "in_progress", "done", "blocked", "skipped"]
@@ -33,6 +30,12 @@ def truncate(text: str, limit: int) -> str:
     return text[:limit] + f"... [truncated {len(text) - limit} chars]"
 
 
+def _build(cls: type, data: dict) -> Any:
+    """Construct dataclass ``cls`` from ``data``, ignoring unknown keys (older or newer stored versions)."""
+    names = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in data.items() if k in names})
+
+
 @dataclass
 class PlanItem:
     """One checklist entry of the agent's plan."""
@@ -41,6 +44,11 @@ class PlanItem:
     text: str
     status: PlanStatus = "pending"
     note: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PlanItem:
+        """Inverse of ``asdict``."""
+        return _build(cls, data)
 
 
 PLAN_MARKS = {"pending": "[ ]", "in_progress": "[>]", "done": "[x]", "blocked": "[!]", "skipped": "[-]"}
@@ -65,6 +73,11 @@ class Fact:
     source: str = ""
     step: int = 0
 
+    @classmethod
+    def from_dict(cls, data: dict) -> Fact:
+        """Inverse of ``asdict``."""
+        return _build(cls, data)
+
 
 @dataclass
 class Step:
@@ -86,6 +99,11 @@ class Step:
     timestamp: str = field(default_factory=utcnow)
     turn: int = 0  # which LLM reply produced this step; steps of one turn share an assistant message
     tool_call_id: str = ""  # links the step to the model's tool call (needed to rebuild the transcript)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Step:
+        """Inverse of ``asdict``."""
+        return _build(cls, data)
 
 
 @dataclass
@@ -115,8 +133,12 @@ class RunState:
         """Plain-dict form, safe for ``json.dumps``."""
         return asdict(self)
 
-    def save(self, path: Path) -> None:
-        """Write the state as JSON atomically (write to a temp file, then replace)."""
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-        os.replace(tmp, path)
+    @classmethod
+    def from_dict(cls, data: dict) -> RunState:
+        """Inverse of ``to_dict``; tolerant of missing optional fields so older stored runs still load."""
+        state = _build(cls, {k: v for k, v in data.items() if k not in ("plan", "facts", "steps")})
+        state.plan = [PlanItem.from_dict(p) for p in data.get("plan") or []]
+        state.facts = {key: Fact.from_dict(f) for key, f in (data.get("facts") or {}).items()}
+        state.steps = [Step.from_dict(s) for s in data.get("steps") or []]
+        state.usage = {**{"llm_calls": 0, "input_tokens": 0, "output_tokens": 0}, **(data.get("usage") or {})}
+        return state

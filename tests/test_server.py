@@ -144,7 +144,7 @@ def test_run_end_to_end_with_approval_over_websocket(make_client, tmp_path):
 
     # Seq numbers are contiguous, and the same events are on disk.
     log_lines = [json.loads(line) for line in (tmp_path / "runs" / run_id / "events.jsonl").read_text().splitlines()]
-    assert [e["seq"] for e in log_lines] == list(range(len(log_lines)))
+    assert [e["seq"] for e in log_lines] == list(range(1, len(log_lines) + 1))  # 1-based, like a DB sequence
     assert log_lines[-1]["type"] == "run_finished"
 
     # A late subscriber gets the whole history replayed, then the stream closes.

@@ -14,7 +14,19 @@
       <span class="brand-name">CentrAlign Worker</span>
       <span class="brand-sub">autonomous task agent</span>
     </div>
+    <nav id="main-nav" class="main-nav hidden" aria-label="Pages">
+      <button class="nav-btn active" type="button" data-view="dashboard">Dashboard</button>
+      <button class="nav-btn hidden" type="button" data-view="admin">Admin</button>
+      <button class="nav-btn hidden" type="button" data-view="credentials">Credentials</button>
+    </nav>
     <div class="topbar-right">
+      <span id="user-box" class="user-box hidden">
+        <select id="org-switch" class="org-switch hidden" title="Switch organization" aria-label="Organization"></select>
+        <span id="org-name" class="org-name"></span>
+        <span id="user-name" class="user-name"></span>
+        <span id="role-badge" class="role-badge" title="Your role in this organization"></span>
+        <button id="logout-btn" class="topbar-link" type="button" title="Sign out">Sign out</button>
+      </span>
       <span id="run-pill" class="pill pill-idle" title="Status of the run being viewed">Idle</span>
       <span id="model-badge" class="badge badge-model" title="LLM provider and model">connecting...</span>
       <a id="company-link" class="topbar-link hidden" href="/company" target="_blank" rel="noopener"
@@ -26,11 +38,12 @@
     </div>
   </header>
 
-  <main class="layout">
+  <main class="layout" id="view-dashboard">
     <!-- LEFT: controls -->
     <aside class="col col-left">
       <section class="card">
         <h2>New task</h2>
+        <div id="access-note" class="notice hidden"></div>
         <textarea id="task" rows="5" placeholder="Describe a business task in plain language..." spellcheck="false"></textarea>
         <div class="field-label">Examples</div>
         <div id="presets" class="chips"></div>
@@ -118,6 +131,76 @@
     </aside>
   </main>
 
+  <!-- Multi-user mode only: Admin and Credentials pages (filled by admin.js) -->
+  <section id="view-admin" class="page hidden" aria-label="Administration">
+    <div class="page-inner">
+      <div class="card">
+        <div class="card-head"><h2>Members</h2><button id="member-add-toggle" class="btn btn-small" type="button">Add member</button></div>
+        <form id="member-form" class="inline-form hidden" autocomplete="off">
+          <label class="field"><span class="field-label">Email</span><input id="member-email" type="email" required maxlength="320"></label>
+          <label class="field"><span class="field-label">Name</span><input id="member-name" type="text" maxlength="120"></label>
+          <label class="field"><span class="field-label">Role</span><select id="member-role"></select></label>
+          <label class="field"><span class="field-label">Password (optional)</span><input id="member-password" type="password" minlength="10" autocomplete="new-password" placeholder="generated if empty"></label>
+          <button class="btn btn-primary" type="submit">Add</button>
+        </form>
+        <div id="member-secret" class="notice hidden"></div>
+        <div class="table-wrap"><table id="members-table" class="data-table"></table></div>
+      </div>
+      <div class="card">
+        <h2>Organization settings</h2>
+        <form id="settings-form" class="settings-grid"></form>
+      </div>
+      <div class="card">
+        <h2>Simulated company (environment)</h2>
+        <p id="env-status" class="muted small"></p>
+        <button id="env-provision" class="btn btn-ghost fit" type="button">Provision environment</button>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Recent activity</h2><button id="audit-refresh" class="link-btn" type="button">refresh</button></div>
+        <div class="table-wrap"><table id="audit-table" class="data-table"></table></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-credentials" class="page hidden" aria-label="Credentials">
+    <div class="page-inner">
+      <div class="card">
+        <div class="card-head"><h2>Credential vault</h2><button id="cred-add" class="btn btn-small" type="button">Add credential</button></div>
+        <p class="hint">Credentials are encrypted. The agent can use them (type into login forms, send as API headers) but never sees the values, and neither does this page: secret fields are write-only.</p>
+        <div class="table-wrap"><table id="cred-table" class="data-table"></table></div>
+      </div>
+      <form id="cred-form" class="card hidden" autocomplete="off">
+        <h2 id="cred-form-title">Add credential</h2>
+        <div class="form-grid">
+          <label class="field"><span class="field-label">Name</span><input id="cred-name" type="text" required maxlength="64" pattern="[A-Za-z0-9_.\-]+" placeholder="e.g. erp"></label>
+          <label class="field"><span class="field-label">Kind</span><select id="cred-kind">
+            <option value="login">Login (username + password)</option>
+            <option value="api_key">API key</option>
+            <option value="header">HTTP header</option></select></label>
+          <label class="field"><span class="field-label">Description</span><input id="cred-description" type="text" maxlength="300"></label>
+          <label class="field"><span class="field-label">URL where it is used</span><input id="cred-url" type="text" maxlength="300" placeholder="http://host/login"></label>
+          <label class="field"><span class="field-label">Host limit (optional)</span><input id="cred-host" type="text" maxlength="253" placeholder="defaults to the URL's host"></label>
+        </div>
+        <div id="cred-fields" class="form-grid"></div>
+        <div class="actions"><button class="btn btn-primary fit" type="submit">Save</button><button id="cred-cancel" class="btn btn-ghost fit" type="button">Cancel</button></div>
+      </form>
+    </div>
+  </section>
+
+  <!-- Multi-user mode only: the sign-in screen -->
+  <div id="login-screen" class="login-screen hidden">
+    <form id="login-form" class="login-card" autocomplete="on">
+      <h1>Sign in</h1>
+      <p class="muted small">Use the account your organization administrator created for you.</p>
+      <div id="login-error" class="login-error hidden" role="alert"></div>
+      <label class="field-label" for="login-email">Email</label>
+      <input id="login-email" type="email" autocomplete="username" required autofocus>
+      <label class="field-label" for="login-password">Password</label>
+      <input id="login-password" type="password" autocomplete="current-password" required>
+      <button id="login-submit" class="btn btn-primary" type="submit">Sign in</button>
+    </form>
+  </div>
+
   <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true">
     <button id="lightbox-close" class="lightbox-close" type="button" aria-label="Close">&times;</button>
     <img id="lightbox-img" alt="">
@@ -126,5 +209,6 @@
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
   <script src="/ui/app.js"></script>
+  <script src="/ui/admin.js"></script>
 </body>
 </html>

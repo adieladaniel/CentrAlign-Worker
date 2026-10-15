@@ -9,19 +9,21 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from reportlab.pdfgen import canvas
 
 from worker.config import Settings
 from worker.tools import retry as retry_module
 from worker.tools.base import Risk, ToolContext
 from worker.tools.browser import (
-    BrowserHub,
     BrowserSession,
     browser_tools,
     classify_element,
     close_browser,
     register_browser_tools,
+    session_for,
 )
+from worker.tools.browser_pool import POOL_KEY, BrowserPool
 from worker.tools.registry import ToolRegistry
 from worker.tools.retry import execute_with_retry
 from worker.tools.snapshot import chunk_lines, element_line, find_in_page, format_snapshot
@@ -78,17 +80,18 @@ def fast_backoff(monkeypatch):
 
 
 @pytest.fixture
-def ctx(tmp_path) -> ToolContext:
+def ctx(tmp_path, browser_pool) -> ToolContext:
     workspace = tmp_path / "workspace"
     run_dir = tmp_path / "runs" / "r1"
     workspace.mkdir()
     run_dir.mkdir(parents=True)
     return ToolContext(
-        run_id="r1", run_dir=run_dir, workspace=workspace, settings=Settings(_env_file=None, HEADLESS=True)
+        run_id="r1", run_dir=run_dir, workspace=workspace, settings=Settings(_env_file=None, HEADLESS=True),
+        extras={POOL_KEY: browser_pool},
     )
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def tools(ctx):
     registry = ToolRegistry()
     register_browser_tools(registry)
@@ -396,28 +399,28 @@ async def test_tool_classify_and_describe(tools, ctx, base_url):
     nav, read = tools.get("browser_navigate"), tools.get("browser_read_page")
 
     save, nxt, delete = (ref_of(obs, f'button "{n}"') for n in ("Save bill", "Next", "Delete"))
-    assert click.classify({"ref": save}) is Risk.WRITE
-    assert click.classify({"ref": delete}) is Risk.IRREVERSIBLE
-    assert click.classify({"ref": nxt}) is Risk.READ
-    assert click.classify({"ref": ref_of(obs, 'link "Bills"')}) is Risk.READ
-    assert click.classify({"ref": 4242}) is Risk.READ  # unknown ref, will fail at run time
+    assert click.classify({"ref": save}, ctx) is Risk.WRITE
+    assert click.classify({"ref": delete}, ctx) is Risk.IRREVERSIBLE
+    assert click.classify({"ref": nxt}, ctx) is Risk.READ
+    assert click.classify({"ref": ref_of(obs, 'link "Bills"')}, ctx) is Risk.READ
+    assert click.classify({"ref": 4242}, ctx) is Risk.WRITE  # unknown ref: never downgraded to READ
 
-    assert click.describe_action({"ref": save}) == 'Click button "Save bill" on /form.html'
-    assert nav.classify({"url": "http://x"}) is Risk.READ
-    assert read.classify({}) is Risk.READ
+    assert click.describe_action({"ref": save}, ctx) == 'Click button "Save bill" on /form.html'
+    assert nav.classify({"url": "http://x"}, ctx) is Risk.READ
+    assert read.classify({}, ctx) is Risk.READ
 
     due = ref_of(obs, 'textbox "Due date"')
-    assert typ.classify({"ref": due, "text": "x"}) is Risk.READ
-    assert typ.classify({"ref": due, "text": "x", "submit": True}) is Risk.WRITE  # Enter submits the "Save bill" form
+    assert typ.classify({"ref": due, "text": "x"}, ctx) is Risk.READ
+    assert typ.classify({"ref": due, "text": "x", "submit": True}, ctx) is Risk.WRITE  # Enter submits the "Save bill" form
     search = ref_of(obs, 'textbox "Search bills"')
-    assert typ.classify({"ref": search, "text": "x", "submit": True}) is Risk.READ  # search form
-    assert sel.classify({"ref": ref_of(obs, 'combobox "Vendor"'), "option": "x"}) is Risk.READ
-    assert typ.describe_action({"ref": due, "text": "2026-11-15"}) == (
+    assert typ.classify({"ref": search, "text": "x", "submit": True}, ctx) is Risk.READ  # search form
+    assert sel.classify({"ref": ref_of(obs, 'combobox "Vendor"'), "option": "x"}, ctx) is Risk.READ
+    assert typ.describe_action({"ref": due, "text": "2026-11-15"}, ctx) == (
         'Type "2026-11-15" into textbox "Due date" on /form.html'
     )
     pw = ref_of(obs, "Portal password")
-    assert "hunter2" not in typ.describe_action({"ref": pw, "text": "hunter2"})
-    assert sel.describe_action({"ref": ref_of(obs, "Vendor"), "option": "Initech"}).startswith(
+    assert "hunter2" not in typ.describe_action({"ref": pw, "text": "hunter2"}, ctx)
+    assert sel.describe_action({"ref": ref_of(obs, "Vendor"), "option": "Initech"}, ctx).startswith(
         'Select "Initech" in combobox "Vendor"'
     )
 
@@ -425,18 +428,18 @@ async def test_tool_classify_and_describe(tools, ctx, base_url):
 async def test_press_enter_classification_follows_focus(tools, ctx, base_url):
     obs = await open_form(tools, ctx, base_url)
     press = tools.get("browser_press")
-    assert press.classify({"key": "Enter"}) is Risk.READ  # nothing focused
-    assert press.classify({"key": "Tab"}) is Risk.READ
+    assert press.classify({"key": "Enter"}, ctx) is Risk.READ  # nothing focused
+    assert press.classify({"key": "Tab"}, ctx) is Risk.READ
 
     # focus the Due date field (inside the "Save bill" form); the snapshot reports the focus
     await call(tools, ctx, "browser_type", ref=ref_of(obs, 'textbox "Due date"'), text="2026-11-15")
-    assert press.classify({"key": "Enter"}) is Risk.WRITE
-    assert press.classify({"key": "Tab"}) is Risk.READ
-    assert 'on textbox "Due date"' in press.describe_action({"key": "Enter"})
+    assert press.classify({"key": "Enter"}, ctx) is Risk.WRITE
+    assert press.classify({"key": "Tab"}, ctx) is Risk.READ
+    assert 'on textbox "Due date"' in press.describe_action({"key": "Enter"}, ctx)
 
     # focus the search box (search form): Enter is harmless
     await call(tools, ctx, "browser_type", ref=ref_of(obs, 'textbox "Search bills"'), text="abc")
-    assert press.classify({"key": "Enter"}) is Risk.READ
+    assert press.classify({"key": "Enter"}, ctx) is Risk.READ
 
 
 # ----------------------------------------------------------------------------- read-only mode
@@ -507,7 +510,7 @@ async def test_write_click_timeout_is_not_retried_but_read_click_is(tools, ctx, 
     save = ref_of(obs, 'button "Save bill"')
     field = ref_of(obs, 'textbox "Invoice number"')
     click = tools.get("browser_click")
-    assert click.classify({"ref": save}) is Risk.WRITE and click.classify({"ref": field}) is Risk.READ
+    assert click.classify({"ref": save}, ctx) is Risk.WRITE and click.classify({"ref": field}, ctx) is Risk.READ
 
     runs = []
 
@@ -531,7 +534,7 @@ async def test_write_click_timeout_is_not_retried_but_read_click_is(tools, ctx, 
 async def test_browser_crash_is_recovered(tools, ctx, base_url):
     obs = await open_form(tools, ctx, base_url)
     session: BrowserSession = ctx.extras["browser"]
-    await session._browser.close()  # simulate a crash
+    await session._context.browser.close()  # simulate a crash
     # the next call relaunches Chromium and tells the agent the old page is gone
     result = await tools.get("browser_read_page").run({}, ctx)
     assert result.ok and "browser was restarted" in result.observation
@@ -562,6 +565,9 @@ async def test_headed_slow_mo_setting(ctx, monkeypatch):
         def is_connected(self):
             return True
 
+        def on(self, *args):
+            pass
+
         async def new_context(self, **kw):
             raise RuntimeError("stop here")
 
@@ -583,14 +589,16 @@ async def test_headed_slow_mo_setting(ctx, monkeypatch):
         async def start(self):
             return FakePW()
 
-    import worker.tools.browser as browser_module
+    import worker.tools.browser_pool as pool_module
 
-    monkeypatch.setattr(browser_module, "async_playwright", lambda: FakeStarter())
+    monkeypatch.setattr(pool_module, "async_playwright", lambda: FakeStarter())
     ctx.settings.HEADLESS = False
-    session = BrowserSession(ctx)
+    pool = BrowserPool(max_contexts=1)
+    session = BrowserSession(ctx, pool)
     with pytest.raises(RuntimeError):
         await session.start()
     assert launched == {"headless": False, "slow_mo": 150}
+    assert pool.active_contexts == 0  # the failed acquire gave its slot back
 
 
 # ----------------------------------------------------------------------------- pure formatting
@@ -647,10 +655,8 @@ def test_find_in_page_context():
 
 
 async def test_tools_share_one_session_per_ctx(ctx):
-    hub = BrowserHub()
-    a, b = browser_tools(hub)[:2]
-    assert a.hub is b.hub
-    assert hub.session_for(ctx) is hub.session_for(ctx)
+    assert session_for(ctx) is session_for(ctx) is ctx.extras["browser"]
+    assert not hasattr(browser_tools()[0], "hub")  # tools are stateless: no per-run state on them
 
 
 # ----------------------------------------------------------------------------- approval preview (form values)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 import sqlite3
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -10,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from .. import chaos, config, db, state
+from .. import chaos, config, db, state, tenants
 from ..auth import erp_auth
 from .common import add_login_routes, flash, redirect, render
 
@@ -203,8 +204,8 @@ async def approve_bill(bill_id: int, session: dict = Depends(user)):
 # --------------------------------------------------------------------------- REST API
 api = APIRouter(prefix="/erp/api", tags=["erp-api"])
 
-API_SUMMARY = f"""Ledger ERP REST API (base: {config.BASE_URL}/erp/api)
-Auth: send header "X-API-Key: {config.ERP_API_KEY}" on every request except this one.
+API_SUMMARY = """Ledger ERP REST API (base: {base_url}/erp/api)
+Auth: send header "X-API-Key: {api_key}" on every request except this one.
 
 GET  /erp/api/vendors
      List the vendor master: [{{id, name, code}}].
@@ -221,7 +222,9 @@ POST /erp/api/bills   (Content-Type: application/json)
 
 
 def require_api_key(request: Request) -> None:
-    if request.headers.get("X-API-Key") != config.ERP_API_KEY:
+    """The key must be the current tenant's own (the tenant itself was picked from this very header)."""
+    supplied = request.headers.get("X-API-Key", "")
+    if not secrets.compare_digest(supplied.encode(), tenants.current().api_key.encode()):
         raise HTTPException(401, "Invalid or missing API key")
 
 
@@ -232,7 +235,7 @@ def _api_bill(bill: dict) -> dict:
 
 @api.get("/docs-summary", response_class=PlainTextResponse)
 async def docs_summary() -> str:
-    return API_SUMMARY
+    return API_SUMMARY.format(base_url=config.BASE_URL, api_key=tenants.current().api_key)
 
 
 @api.get("/vendors", dependencies=[Depends(require_api_key)])

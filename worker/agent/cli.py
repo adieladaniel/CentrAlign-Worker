@@ -11,6 +11,7 @@ from worker.agent.runner import AgentRunner
 from worker.agent.toolset import build_registry
 from worker.config import get_settings
 from worker.llm.factory import make_llm
+from worker.vault import default_scope
 
 
 def _show(text: str, limit: int = 300) -> str:
@@ -80,7 +81,8 @@ async def run_cli(task: str, approval: str | None, headed: bool) -> int:
         overrides["APPROVAL_MODE"] = approval
     settings = get_settings().model_copy(update=overrides)
     runner = AgentRunner(
-        task, make_llm(settings), build_registry(settings), settings, AutoBroker(answer_in_terminal), event_sink=print_event
+        task, make_llm(settings), build_registry(settings), settings, AutoBroker(answer_in_terminal),
+        event_sink=print_event, vault_scope=await default_scope(settings),
     )
     state = await runner.run()
     print(f"\nRun files: {runner.run_dir}")

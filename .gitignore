@@ -46,3 +46,7 @@ playwright-report/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Credential vault: encrypted file and the dev-generated key (never commit)
+.vault/
+.vault_key

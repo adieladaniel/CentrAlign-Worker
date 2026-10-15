@@ -100,7 +100,7 @@ def main() -> int:
     try:
         sim = spawn("simulated company", "company_sim")
         procs.append(("company_sim", sim))
-        wait_healthy(f"{SIM_URL}/admin/chaos", "company_sim", sim)
+        wait_healthy(f"{SIM_URL}/healthz", "company_sim", sim)
         print(f"[run] simulated company ready at {SIM_URL}  (mail, vendor portal, ERP)")
 
         worker = spawn("worker server", "worker.server")
