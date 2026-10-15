@@ -1,0 +1,41 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# VCS, IDE, OS
+.git
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime data that must not ship (regenerated at start)
+runs/
+company_sim/data/
+workspace/
+evals/results/*.json
+evals/results/*.log
+test-results/
+playwright-report/
+.playwright/
+*.trace.zip
+
+# Not needed in the image
+tests/
+pytest.ini
+docs/

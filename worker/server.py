@@ -12,12 +12,13 @@ import json
 import logging
 import re
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -27,6 +28,7 @@ from worker.agent.runner import AgentRunner
 from worker.agent.state import TERMINAL_STATUSES, utcnow
 from worker.agent.toolset import build_registry
 from worker.config import Settings, get_settings
+from worker.deploy import AccessControl, DailyRunCap, install_access_control, install_sim_proxy
 from worker.llm.base import LLMClient, LLMError
 from worker.llm.factory import make_llm
 from worker.llm.failover import DEFAULT_HEALTH, active_model
@@ -248,13 +250,29 @@ def create_app(
 ) -> FastAPI:
     """Build the FastAPI app. ``llm_factory`` / ``registry_factory`` are seams for tests."""
     base_settings = settings or get_settings()
-    app = FastAPI(title="CentrAlign Worker", version="1.0")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        close = getattr(app.state, "close_sim_client", None)
+        if close is not None:
+            await close()
+
+    app = FastAPI(title="CentrAlign Worker", version="1.0", lifespan=lifespan)
     app.state.llm_factory = llm_factory or make_llm
     app.state.registry_factory = registry_factory or build_registry
     app.state.settings = base_settings
     sessions: dict[str, RunSession] = {}
     app.state.sessions = sessions
     runs_dir = Path(base_settings.RUNS_DIR).resolve()
+    access = AccessControl(base_settings.ACCESS_PASSWORD, base_settings.SESSION_SECRET)
+    run_cap = DailyRunCap(base_settings.MAX_RUNS_PER_DAY)
+    app.state.access, app.state.run_cap = access, run_cap
+
+    def public_config() -> dict:
+        cfg: Settings = app.state.settings
+        return {"deploy_mode": cfg.DEPLOY_MODE, "sim_proxy": cfg.PUBLIC_SIM_PROXY, "auth_enabled": access.enabled,
+                "max_runs_per_day": run_cap.limit or None, "runs_left_today": run_cap.remaining()}
 
     def active_session() -> RunSession | None:
         return next((s for s in sessions.values() if s.active), None)
@@ -272,7 +290,13 @@ def create_app(
         task_text = req.task.strip()
         if not task_text:
             raise HTTPException(status_code=422, detail="Task is empty")
-        overrides: dict[str, Any] = {"HEADLESS": not req.headed}
+        if not run_cap.allow():
+            raise HTTPException(
+                status_code=429, headers={"Retry-After": str(run_cap.seconds_until_reset())},
+                detail=f"Daily demo limit reached: this deployment allows {run_cap.limit} runs per day (UTC) to protect the "
+                       "shared Gemini quota. Please try again tomorrow.")
+        headed = req.headed and not app.state.settings.DEPLOY_MODE  # server mode is always headless
+        overrides: dict[str, Any] = {"HEADLESS": not headed}
         if req.approval_mode:
             overrides["APPROVAL_MODE"] = req.approval_mode
         run_settings = app.state.settings.model_copy(update=overrides)
@@ -294,6 +318,7 @@ def create_app(
                              log_path=runner.run_dir / "events.jsonl")
         session_holder["s"] = session
         sessions[run_id] = session
+        run_cap.record()
         session.task_handle = asyncio.create_task(_supervise(session), name=f"run-{run_id}")
         return {"run_id": run_id}
 
@@ -471,8 +496,10 @@ def create_app(
         return await sim_call("GET", "/admin/chaos")
 
     @app.get("/api/health")
-    async def health() -> dict:
+    async def health(request: Request) -> dict:
         current: Settings = app.state.settings
+        if access.enabled and not access.is_authenticated(dict(request.cookies)):
+            return {"status": "ok"}  # public health check: nothing about the deployment
         busy = active_session()
         chain = current.gemini_models
         model = {"gemini": active_model(chain), "ollama": current.OLLAMA_MODEL}.get(current.LLM_PROVIDER, "scripted")
@@ -489,8 +516,13 @@ def create_app(
             "status": "ok", "provider": current.LLM_PROVIDER, "model": model, "models_unavailable": unavailable,
             "approval_mode": current.APPROVAL_MODE, "sim_reachable": sim_ok, "sim_url": current.SIM_BASE_URL,
             "api_key_set": bool(current.GEMINI_API_KEY) or current.LLM_PROVIDER != "gemini",
-            "headless": current.HEADLESS, "active_run": busy.run_id if busy else None,
+            "headless": current.HEADLESS or current.DEPLOY_MODE, "active_run": busy.run_id if busy else None,
+            **public_config(),
         }
+
+    @app.get("/api/config")
+    async def config() -> dict:
+        return public_config()
 
     # ----------------------------------------------------------------- dashboard
 
@@ -510,6 +542,10 @@ def create_app(
 
     if UI_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=UI_DIR), name="ui")
+    if base_settings.PUBLIC_SIM_PROXY:
+        install_sim_proxy(app, base_settings)
+    if access.enabled:
+        install_access_control(app, access)
     return app
 
 

@@ -134,6 +134,7 @@ async function api(method, url, body) {
   });
   let data = null;
   try { data = await resp.json(); } catch (e) { /* no body */ }
+  if (resp.status === 401) { location.href = "/login?next=" + encodeURIComponent(location.pathname); throw new Error("Please sign in"); }
   if (!resp.ok) {
     const detail = data && data.detail ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : resp.statusText;
     throw new Error(detail);
@@ -158,6 +159,7 @@ function freshView() {
     facts: new Map(), plan: [], status: "idle", startedAt: null,
     stats: { llm_calls: 0, input_tokens: 0, output_tokens: 0, llm_retries: 0, steps: 0, retries: 0, failures: 0, approved: 0, denied: 0 },
     verifyBody: null,
+    actions: new Map(), live: null, replaying: false, // live browser card: latest screenshot + caption
   };
 }
 
@@ -173,6 +175,7 @@ function resetView() {
   renderStats();
   setStatus("idle");
   $("timeline-meta").textContent = "";
+  renderLive();
   S.autoscroll = true;
   $("autoscroll-btn").classList.add("hidden");
 }
@@ -317,7 +320,25 @@ function buildToolCard(info) {
   return { el: card, update };
 }
 
+function renderLive() {
+  const live = S.view && S.view.live;
+  $("live-btn").classList.toggle("hidden", !live);
+  $("live-empty").classList.toggle("hidden", !!live);
+  $("live-caption").textContent = live ? live.caption : "";
+  if (live) $("live-img").src = live.url; else $("live-img").removeAttribute("src");
+}
+
+function noteLiveShot(p) {
+  const shots = (p.evidence || []).filter(isImage);
+  if (!shots.length) return;
+  const v = S.view;
+  const action = v.actions.get(p.tool) || p.action || fallbackAction(p.tool, p.args || {});
+  v.live = { url: fileUrl(p.run_id || S.runId, shots[shots.length - 1]), caption: `Step ${v.stats.steps}: ${p.tool} ${action}`.trim() };
+  if (!v.replaying) renderLive(); // while replaying history only the final screenshot is loaded (see replay_done)
+}
+
 function handleToolStarted(p) {
+  S.view.actions.set(p.tool, p.action || fallbackAction(p.tool, p.args || {}));
   const card = buildToolCard({ tool: p.tool, action: p.action, args: p.args, risk: p.risk });
   S.view.runningCards.push({ tool: p.tool, ...card });
   append(card.el);
@@ -340,6 +361,7 @@ function handleToolFinished(p) {
     append(card.el);
   }
   card.update(p, p.run_id || S.runId);
+  noteLiveShot(p);
   renderStats();
   scheduleScroll();
 }
@@ -521,7 +543,9 @@ function handleRunFinished(p) {
   const r = p.report || {};
   const [mark, title] = BANNERS[p.status] || ["?", p.status];
   const runId = p.run_id || S.runId;
+  const quotaOut = /out of free-tier quota|quota exhausted/i.test(r.summary || "");
   const card = h("div", { class: `report ${p.status}` },
+    quotaOut ? h("div", { class: "notice" }, "All Gemini models are out of free-tier quota for today. The demo shares one API key, so this run stopped early. Try again tomorrow (the quota resets daily), or pick a task that needs fewer model calls.") : null,
     h("div", { class: "report-banner" }, h("span", { class: "banner-mark" }, mark), title),
     h("div", { class: "report-section" }, h("h3", null, "Summary"), h("div", { class: "report-summary" }, r.summary || "(no summary)")));
   const outputs = Object.entries(r.outputs || {});
@@ -550,6 +574,7 @@ function handleRunFinished(p) {
     h("div", { class: "report-stats" }, Object.entries(st).map(([k, val]) => h("span", { class: "tag" }, `${k.replace(/_/g, " ")}: ${val}`))),
     h("div", { class: "report-links", style: null }, h("a", { href: fileUrl(runId, "report.md"), target: "_blank", rel: "noopener" }, "Open report.md"))));
   append(card);
+  if (quotaOut && !v.replaying) toast("All Gemini models are out of quota for today. Try again tomorrow.", "error");
   refreshHistory();
 }
 
@@ -617,6 +642,8 @@ function handleEvent(ev) {
       break;
     }
     case "replay_done":
+      v.replaying = false;
+      renderLive();
       if (!p.live) { S.finished = true; }
       break;
     case "error":
@@ -637,7 +664,7 @@ function connect(runId) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/api/runs/${encodeURIComponent(runId)}/events`);
   S.ws = ws;
-  ws.onopen = () => { if (token === S.connToken) resetView(); };
+  ws.onopen = () => { if (token === S.connToken) { resetView(); S.view.replaying = true; } };
   ws.onmessage = (msg) => {
     if (token !== S.connToken) return;
     let ev;
@@ -710,6 +737,10 @@ function updateRunButtons() {
 async function startRun() {
   const task = $("task").value.trim();
   if (!task) { toast("Describe a task first, or pick an example.", "error"); $("task").focus(); return; }
+  if (S.config && S.config.runs_left_today === 0) {
+    toast(`Daily demo limit reached (${S.config.max_runs_per_day} runs per day, UTC). Please try again tomorrow.`, "error");
+    return;
+  }
   $("run-btn").disabled = true;
   try {
     if ($("reset-before").checked) await resetEnvironment(true);
@@ -771,6 +802,15 @@ function loadRun(id) {
 
 /* ------------------------------------------------------------------ health */
 
+// Deployment flags arrive with /api/health (deploy_mode, sim_proxy, auth_enabled, runs_left_today, ...).
+function applyConfig(cfg) {
+  S.config = cfg;
+  $("headed-switch").classList.toggle("hidden", !!cfg.deploy_mode);
+  if (cfg.deploy_mode) $("headed").checked = false;
+  $("company-link").classList.toggle("hidden", !cfg.sim_proxy);
+  $("logout-link").classList.toggle("hidden", !cfg.auth_enabled);
+}
+
 async function pollHealth() {
   try {
     const hl = await api("GET", "/api/health");
@@ -781,6 +821,7 @@ async function pollHealth() {
     $("sim-label").textContent = hl.sim_reachable ? "environment online" : "environment offline";
     if (hl.sim_reachable && !chaosLoaded) loadChaos();
     $("approval-mode").dataset.default = hl.approval_mode;
+    applyConfig(hl);
     if (!pollHealth.seeded) { $("approval-mode").value = hl.approval_mode; $("headed").checked = !hl.headless; pollHealth.seeded = true; }
     const before = S.activeRunId;
     S.activeRunId = hl.active_run;
@@ -828,6 +869,7 @@ function init() {
     updateRunButtons();
   });
   $("history-refresh").addEventListener("click", refreshHistory);
+  $("live-btn").addEventListener("click", () => { const l = S.view && S.view.live; if (l) openLightbox(l.url, l.caption); });
   $("lightbox").addEventListener("click", (e) => { if (e.target.id !== "lightbox-img") closeLightbox(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLightbox(); });
   $("task").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) startRun(); });

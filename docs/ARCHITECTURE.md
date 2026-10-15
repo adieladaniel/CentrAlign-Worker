@@ -404,3 +404,14 @@ Nothing in the agent is specific to the simulator:
 ### Change policy
 
 Set `APPROVAL_MODE`, or adjust the label patterns in [browser.py](../worker/tools/browser.py) (`_IRREVERSIBLE_RE`, `_WRITE_RE`, `_BENIGN_RE`) for an application whose buttons are named differently. Tests for the matrix are in `tests/test_agent_policy.py` and `tests/test_browser_tool.py`.
+
+## Deployment topology (optional, opt-in)
+
+For a hosted demo the container runs two processes under `deploy/start.py`: the simulated company on `127.0.0.1:8001`
+(internal only, a single process because chaos flags and sessions live in memory) and the worker on `0.0.0.0:$PORT`
+(the one public port). With `PUBLIC_SIM_PROXY=1` the worker streams `/mail`, `/portal`, `/erp`, `/static` and a `/company`
+alias to the sim (cookies and redirects preserved, `Location` rewritten, `/admin/*` never exposed); the agent's browser
+still talks to the sim directly. With `ACCESS_PASSWORD` set, an ASGI gate (`worker/deploy.py`) requires a signed session
+cookie on every route including the WebSocket; `/api/health` stays public but minimal. `DEPLOY_MODE=1` forces headless
+runs and `MAX_RUNS_PER_DAY` caps runs per UTC day (HTTP 429). Disk is assumed ephemeral. None of this changes local
+`python run.py` behavior.

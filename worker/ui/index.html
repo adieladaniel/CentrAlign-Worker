@@ -17,7 +17,10 @@
     <div class="topbar-right">
       <span id="run-pill" class="pill pill-idle" title="Status of the run being viewed">Idle</span>
       <span id="model-badge" class="badge badge-model" title="LLM provider and model">connecting...</span>
-      <span class="sim-status" title="Simulated company environment (port 8001)">
+      <a id="company-link" class="topbar-link hidden" href="/company" target="_blank" rel="noopener"
+         title="Open the simulated company's mail, vendor portal and ERP in a new tab">View company systems</a>
+      <a id="logout-link" class="topbar-link hidden" href="/logout" title="Sign out">Sign out</a>
+      <span class="sim-status" title="Simulated company environment">
         <span id="sim-dot" class="dot dot-unknown"></span><span id="sim-label">environment</span>
       </span>
     </div>
@@ -41,7 +44,7 @@
               <option value="auto">Auto (irreversible only)</option>
             </select>
           </label>
-          <label class="switch" title="Show the real browser window while the agent works">
+          <label id="headed-switch" class="switch" title="Show the real browser window while the agent works">
             <input type="checkbox" id="headed">
             <span class="slider"></span>
             <span class="switch-label">Headed browser</span>
@@ -89,6 +92,13 @@
 
     <!-- RIGHT: state -->
     <aside class="col col-right">
+      <section class="card">
+        <h2>Live browser</h2>
+        <button id="live-btn" class="live-shot hidden" type="button" title="Click to enlarge"><img id="live-img" alt="Latest browser screenshot"></button>
+        <div id="live-empty" class="muted small">Screenshots from the agent's browser appear here as it works.</div>
+        <div id="live-caption" class="live-caption small"></div>
+      </section>
+
       <section class="card">
         <h2>Plan</h2>
         <div id="goal" class="goal muted small"></div>

@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     MAX_CONSECUTIVE_FAILURES: int = 4
     RUN_TIMEOUT_S: int = 900
 
+    # Deployment (all opt-in; see README "Deploying a live demo"). Off by default, so local dev is unchanged.
+    ACCESS_PASSWORD: str = ""       # set -> every route needs a login (signed session cookie)
+    SESSION_SECRET: str = ""        # signs the cookie; a random one is generated per process when empty
+    DEPLOY_MODE: bool = False       # server mode: always headless, the dashboard hides the "Headed browser" switch
+    PUBLIC_SIM_PROXY: bool = False  # expose /mail /portal /erp /company through this server (single public port)
+    MAX_RUNS_PER_DAY: int = 0       # runs per UTC day, 0 = unlimited
+
     # Tools
     HTTP_ALLOWED_HOSTS: str = "localhost,127.0.0.1"
 
