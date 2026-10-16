@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from worker.config import Settings
 from worker.db.models import AuditLog, AuthSession, LoginAttempt, Membership, Org, User
 from worker.db.seed import hash_password, verify_password
+from worker.logging_setup import bind_context
 from worker.org_settings import can_approve, effective, policy_view
 
 log = logging.getLogger("worker.auth")
@@ -390,6 +391,7 @@ async def current_context(request: Request) -> OrgContext | None:
     ctx = await service.resolve(request.cookies.get(SESSION_COOKIE))
     if ctx is None:
         raise HTTPException(status_code=401, detail="Not signed in", headers={"WWW-Authenticate": "Session"})
+    bind_context(org_id=ctx.org_id, user_id=ctx.user_id)  # log lines of this request carry who it is for
     return ctx
 
 
@@ -423,7 +425,10 @@ async def websocket_context(service: AuthService, ws: WebSocket) -> OrgContext |
     origin = ws.headers.get("origin")
     if origin and urlsplit(origin).netloc != ws.headers.get("host", ""):
         return None
-    return await service.resolve(ws.cookies.get(SESSION_COOKIE))
+    ctx = await service.resolve(ws.cookies.get(SESSION_COOKIE))
+    if ctx is not None:
+        bind_context(org_id=ctx.org_id, user_id=ctx.user_id)
+    return ctx
 
 
 # --------------------------------------------------------------------------- routes

@@ -44,7 +44,7 @@ async function loadAdminPage() {
   const myRank = roleRank(S.me.org.role);
   $("member-role").replaceChildren(...ROLE_ORDER.filter((r) => roleRank(r) <= myRank)
     .map((r) => h("option", { value: r, title: ROLE_HELP[r], selected: r === "operator" }, `${r} - ${ROLE_HELP[r]}`)));
-  await Promise.all([loadMembers(), loadSettings(), loadEnvironment(), loadAudit()]);
+  await Promise.all([loadMembers(), loadSettings(), loadEnvironment(), loadSystem(), loadUsage(), loadAudit()]);
 }
 
 async function loadMembers() {
@@ -109,7 +109,13 @@ const SETTING_FIELDS = [
   { key: "sod_for_writes", label: "... also for writes", kind: "bool", help: "Extends separation of duties to write actions." },
   { key: "operators_can_approve", label: "Operators can approve", kind: "bool", help: "Otherwise only approvers, admins and owners can." },
   { key: "approval_timeout_s", label: "Approval timeout (s)", kind: "number", min: 30, max: 604800, help: "A pending approval or question is dropped (counts as no response) after this long." },
+  { key: "max_concurrent_runs", label: "Concurrent runs", kind: "number", min: 1, max: 50, help: "Runs of this organization executing at the same time. Further runs wait in the queue for a free slot." },
   { key: "max_runs_per_day", label: "Runs per day", kind: "number", min: 0, max: 100000, help: "0 = unlimited. Counted per UTC day." },
+  { key: "max_tokens_per_day", label: "LLM tokens per day", kind: "number", min: 0, max: 10000000000, help: "Input + output tokens for the whole organization per UTC day. Runs stop with 'needs attention' when it is used up. 0 = unlimited." },
+  { key: "max_llm_calls_per_day", label: "LLM calls per day", kind: "number", min: 0, max: 10000000, help: "Model calls for the whole organization per UTC day. 0 = unlimited." },
+  { key: "gemini_models", label: "Gemini models", kind: "list", help: "Comma-separated fallback chain, tried in order. Empty = the deployment's default chain. An own API key goes into the credential named 'gemini' (kind: API key)." },
+  { key: "memory_recall_limit", label: "Memory notes per run", kind: "number", min: 0, max: 20, help: "How many organization-memory notes an agent receives at the start of a run and per recall. 0 switches organization memory off (nothing recalled, nothing saved)." },
+  { key: "memory_ttl_days", label: "Memory retention (days)", kind: "number", min: 0, max: 3650, help: "A note nobody has used for this many days expires (it is no longer recalled; admins can still see it). 0 = never." },
   { key: "max_steps", label: "Max steps per run", kind: "number", min: 1, max: 500, help: "Real actions before the agent is stopped with partial progress." },
   { key: "run_timeout_s", label: "Run time limit (s)", kind: "number", min: 30, max: 86400, help: "Wall-clock limit per run; waiting for a human does not count." },
 ];
@@ -124,6 +130,7 @@ async function loadSettings() {
     let input;
     if (f.kind === "select") input = h("select", null, f.options.map((o) => h("option", { value: o, selected: o === value }, o)));
     else if (f.kind === "bool") input = h("input", { type: "checkbox", checked: !!value });
+    else if (f.kind === "list") input = h("input", { type: "text", value: (value || []).join(", "), placeholder: "default chain", maxlength: 800 });
     else input = h("input", { type: "number", min: f.min, max: f.max, step: 1, value });
     inputs[f.key] = input;
     return h("label", { class: "setting" }, h("span", { class: "field-label" }, f.label), input, h("span", { class: "hint" }, f.help));
@@ -135,7 +142,8 @@ async function loadSettings() {
     const body = {};
     SETTING_FIELDS.forEach((f) => {
       const el = inputs[f.key];
-      body[f.key] = f.kind === "bool" ? el.checked : f.kind === "number" ? Number(el.value) : el.value;
+      body[f.key] = f.kind === "bool" ? el.checked : f.kind === "number" ? Number(el.value)
+        : f.kind === "list" ? el.value.split(",").map((x) => x.trim()).filter(Boolean) : el.value;
     });
     const out = await guarded(() => api("PUT", "/api/admin/settings", body), "Settings saved");
     if (out) { loadSettings(); loadAudit(); refreshMe(); }
@@ -180,6 +188,137 @@ function auditSummary(r) {
   if (d.risk) bits.push(d.risk);
   if (d.changes || d.changed) bits.push(Object.entries(d.changes || d.changed).map(([k, v]) => `${k}: ${v[0]} -> ${v[1]}`).join(", "));
   return bits.join(" · ");
+}
+
+/* ------------------------------------------------------------------ usage */
+
+const numFmt = new Intl.NumberFormat();
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// The "Usage" card is built here (not in index.html) and placed before the activity card.
+function ensureUsageCard() {
+  if ($("usage-card")) return;
+  const days = h("select", { id: "usage-days", "aria-label": "Period" },
+    [7, 14, 30].map((d) => h("option", { value: d }, `Last ${d} days`)));
+  days.addEventListener("change", loadUsage);
+  const card = h("div", { class: "card", id: "usage-card" },
+    h("div", { class: "card-head" }, h("h2", null, "LLM usage"), days),
+    h("p", { id: "usage-me", class: "muted small" }),
+    h("div", { id: "usage-meters" }),
+    h("div", { class: "table-wrap" }, h("table", { id: "usage-daily", class: "data-table" })),
+    h("div", { class: "usage-split" },
+      h("div", { class: "table-wrap" }, h("table", { id: "usage-users", class: "data-table" })),
+      h("div", { class: "table-wrap" }, h("table", { id: "usage-models", class: "data-table" }))));
+  const inner = document.querySelector("#view-admin .page-inner");
+  inner.insertBefore(card, inner.lastElementChild);
+}
+
+function usageMeter(label, used, limit, unit) {
+  const pct = limit ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  const level = pct >= 100 ? "over" : pct >= 80 ? "warn" : "";
+  const text = limit ? `${numFmt.format(used)} of ${numFmt.format(limit)} ${unit} (${pct}%)` : `${numFmt.format(used)} ${unit} (no limit)`;
+  return h("div", { class: "usage-meter" },
+    h("div", { class: "usage-meter-head" }, h("span", { class: "field-label" }, label), h("span", { class: "muted small" }, text)),
+    h("div", { class: "usage-track", role: "progressbar", "aria-label": label, "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": pct },
+      h("div", { class: `usage-fill ${level}`, style: `width:${pct}%` })));
+}
+
+function usageBar(value, max) { // a tiny inline SVG bar
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("width", "120");
+  svg.setAttribute("height", "10");
+  svg.setAttribute("aria-hidden", "true");
+  const rect = document.createElementNS(SVG_NS, "rect");
+  rect.setAttribute("height", "10");
+  rect.setAttribute("rx", "3");
+  rect.setAttribute("width", String(max ? Math.max(value ? 2 : 0, Math.round((value / max) * 120)) : 0));
+  rect.setAttribute("class", "usage-bar");
+  svg.append(rect);
+  return svg;
+}
+
+async function loadUsage() {
+  ensureUsageCard();
+  const days = Number($("usage-days").value) || 7;
+  const [report, mine] = await Promise.all([guarded(() => api("GET", `/api/admin/usage?days=${days}`)), guarded(() => api("GET", "/api/usage/me"))]);
+  if (mine) $("usage-me").textContent = `You used ${numFmt.format(mine.calls)} calls and ${numFmt.format(mine.tokens)} tokens today (UTC).`;
+  if (!report) return;
+  const t = report.today, lim = report.limits;
+  $("usage-meters").replaceChildren(
+    usageMeter("Tokens today", t.tokens, lim.max_tokens_per_day, "tokens"),
+    usageMeter("Calls today", t.calls, lim.max_llm_calls_per_day, "calls"),
+    h("p", { class: "hint" }, `Budgets reset at ${fmtWhen(report.resets_at)}. Change them under Organization settings.`));
+  const peak = Math.max(0, ...report.daily.map((d) => d.tokens));
+  dataTable($("usage-daily"), ["Day (UTC)", "Calls", "Input tokens", "Output tokens", ""],
+    report.daily.slice().reverse().map((d) => h("tr", null, h("td", null, d.day), h("td", null, numFmt.format(d.calls)),
+      h("td", null, numFmt.format(d.input_tokens)), h("td", null, numFmt.format(d.output_tokens)), h("td", null, usageBar(d.tokens, peak)))),
+    "No usage recorded.");
+  dataTable($("usage-users"), ["Top users", "Calls", "Tokens"], report.by_user.map((u) => h("tr", null,
+    h("td", null, u.name || "(system)"), h("td", null, numFmt.format(u.calls)), h("td", null, numFmt.format(u.tokens)))), "No usage recorded.");
+  dataTable($("usage-models"), ["Models", "Calls", "Tokens"], report.by_model.map((m) => h("tr", null,
+    h("td", { class: "mono small" }, m.model), h("td", null, numFmt.format(m.calls)), h("td", null, numFmt.format(m.tokens)))), "No usage recorded.");
+}
+
+/* ------------------------------------------------------------------ system (read-only) */
+
+const SYSTEM_REFRESH_MS = 15000;
+let systemTimer = null;
+
+// The "System" card is built here and placed before the activity card. It refreshes every 15 s while the Admin page is open.
+function ensureSystemCard() {
+  if ($("system-card")) return;
+  const card = h("div", { class: "card", id: "system-card" },
+    h("div", { class: "card-head" }, h("h2", null, "System"), h("span", { id: "system-scope", class: "muted small" })),
+    h("dl", { id: "system-stats", class: "stats" }),
+    h("div", { class: "table-wrap" }, h("table", { id: "system-queue", class: "data-table" })),
+    h("div", { class: "table-wrap" }, h("table", { id: "system-workers", class: "data-table" })),
+    h("p", { id: "system-note", class: "hint" }));
+  const inner = document.querySelector("#view-admin .page-inner");
+  inner.insertBefore(card, inner.lastElementChild);
+  if (!systemTimer) {
+    systemTimer = setInterval(() => {
+      const open = !$("view-admin").classList.contains("hidden") && document.visibilityState === "visible";
+      if (open) loadSystem();
+    }, SYSTEM_REFRESH_MS);
+  }
+}
+
+function fmtSeconds(s) {
+  if (s === null || s === undefined) return "-";
+  if (s < 60) return `${Math.round(s)} s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m} min ${Math.round(s % 60)} s` : `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+
+async function loadSystem() {
+  ensureSystemCard();
+  let data;
+  try {
+    data = await api("GET", "/api/admin/system");
+  } catch (err) {
+    $("system-note").textContent = `System summary unavailable: ${err.message}`;
+    return;
+  }
+  const tile = (label, value) => h("div", { class: "stat" }, h("dt", null, label), h("dd", null, String(value)));
+  const done = data.finished_24h.by_status;
+  $("system-scope").textContent = data.scope === "platform" ? "all organizations" : `${data.org.name}`;
+  $("system-stats").replaceChildren(
+    tile("Queued", data.totals.queued), tile("Running", data.totals.running), tile("Waiting for a person", data.totals.waiting),
+    tile("Active workers", data.workers.active),
+    tile("Finished (24 h)", data.finished_24h.total),
+    tile("Succeeded (24 h)", done.succeeded || 0),
+    tile("Run time p50", fmtSeconds(data.run_seconds_24h.p50)), tile("Run time p95", fmtSeconds(data.run_seconds_24h.p95)));
+  dataTable($("system-queue"), ["Organization", "Queued", "Oldest queued", "Running", "Waiting"],
+    data.queue.map((q) => h("tr", null, h("td", null, q.name || q.org), h("td", null, q.queued),
+      h("td", null, q.queued ? fmtSeconds(q.oldest_queued_s) : "-"), h("td", null, q.running), h("td", null, q.waiting))),
+    "Nothing queued or running.");
+  dataTable($("system-workers"), ["Worker", "Runs held", "Last heartbeat"],
+    data.workers.list.map((w) => h("tr", null, h("td", { class: "mono small" }, w.worker), h("td", null, w.runs),
+      h("td", null, `${fmtSeconds(w.heartbeat_age_s)} ago`))),
+    "No worker holds a run right now.");
+  const failed = Object.entries(done).filter(([k]) => k !== "succeeded").map(([k, n]) => `${n} ${k.replace("_", " ")}`);
+  $("system-note").textContent = `Refreshes every 15 s. ${data.workers.note}. Run times are wall time, approval waits included.` +
+    (failed.length ? ` Last 24 h besides succeeded: ${failed.join(", ")}.` : "");
 }
 
 /* ------------------------------------------------------------------ credentials page */

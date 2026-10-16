@@ -13,9 +13,10 @@ deactivation ends that user's sessions in this org.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import uuid
-from typing import Any, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -66,7 +67,7 @@ def build_admin_router(
     service: AuthService,
     get_vault: Callable[[], Vault],
     settings: Settings,
-    is_busy: Callable[[uuid.UUID], bool],
+    is_busy: Callable[[uuid.UUID], "bool | Awaitable[bool]"],
     sim_client: Callable[[], httpx.AsyncClient | None] = lambda: None,
 ) -> APIRouter:
     """The admin router. ``get_vault()`` opens the vault on first use. ``is_busy(org_id)`` says whether the org has a
@@ -248,7 +249,8 @@ def build_admin_router(
         org = await org_of(ctx)
         if not org.sim_tenant_id:
             raise HTTPException(status_code=409, detail="This organization has no environment yet: provision it first.")
-        if is_busy(ctx.org_id):
+        busy = is_busy(ctx.org_id)
+        if await busy if inspect.isawaitable(busy) else busy:
             raise HTTPException(status_code=409, detail="A run is active; resetting the environment now would corrupt it.")
         try:
             result = await reset_org_environment(org.sim_tenant_id, settings, body.chaos, sim_client())

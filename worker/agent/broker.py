@@ -31,6 +31,10 @@ class InteractionBroker:
     def __init__(self, default_timeout: float | None = None):
         self.default_timeout = default_timeout
         self._pending: dict[str, PendingRequest] = {}
+        # Why the last request got no answer (set by brokers that know, e.g. PgBroker): the runner puts it in the
+        # denial note, and ends the run when an approval ``last_expired``.
+        self.no_response_reason = ""
+        self.last_expired = False
 
     def pending(self) -> list[dict]:
         """Open requests as plain dicts (for UIs that connect mid-run)."""

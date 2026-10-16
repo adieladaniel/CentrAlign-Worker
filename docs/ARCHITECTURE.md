@@ -354,6 +354,7 @@ Denials, skipped calls, rejected finishes and `ask_user` are not counted as fail
 - [ollama.py](../worker/llm/ollama.py): `/api/chat` with tools; `tool_choice="any"` is advisory only.
 - [resilient.py](../worker/llm/resilient.py): wraps any client with a minimum interval between calls (`LLM_MIN_INTERVAL_S`), retry with backoff, tool-argument validation with one corrective re-prompt, and counters.
 - [fake.py](../worker/llm/fake.py): `ScriptedLLM` for tests; `LLM_PROVIDER=fake` selects an empty one.
+- [policy.py](../worker/llm/policy.py): `PolicyLLM`, a deterministic rule-based stand-in that drives the real tools for the invoice task (and acts as its auditor); `LLM_PROVIDER=policy`, used by [scripts/loadtest.py](../scripts/loadtest.py) (see [SCALING.md](SCALING.md)).
 - [factory.py](../worker/llm/factory.py): `make_llm(settings)`.
 
 ## 12. Simulated company
@@ -415,3 +416,103 @@ still talks to the sim directly. With `ACCESS_PASSWORD` set, an ASGI gate (`work
 cookie on every route including the WebSocket; `/api/health` stays public but minimal. `DEPLOY_MODE=1` forces headless
 runs and `MAX_RUNS_PER_DAY` caps runs per UTC day (HTTP 429). Disk is assumed ephemeral. None of this changes local
 `python run.py` behavior.
+
+## Observability
+
+Logs, metrics and health checks work in both modes (file mode and database mode). Code: `worker/logging_setup.py`,
+`worker/metrics.py`, `worker/observability.py`, `worker/system_api.py`, `worker/health.py`.
+
+### Logs
+
+`LOG_FORMAT=json` (the default when `DEPLOY_MODE` is on) writes one JSON object per line: `ts` (UTC, ms), `level`,
+`logger`, `msg`, the context fields below, any `extra=` fields, and `exc` for a traceback. `LOG_FORMAT=text` (the default
+otherwise) is the readable `time LEVEL logger: message` line with the context appended (`[run=ab12cd34 org=... worker=...]`).
+`LOG_LEVEL` sets the level (default `INFO`). The API (`python -m worker.server`, or `uvicorn worker.server:app`) and the
+workers (`python -m worker.jobs`) call `setup_logging`; uvicorn's own access log is replaced by one request line from the
+middleware (`GET /api/runs -> 200 in 12 ms`; health checks and `/metrics` only at `DEBUG`).
+
+**Context** is carried in `contextvars`, so it follows asyncio tasks without being passed around: `request_id` (the
+middleware accepts a sane `X-Request-ID`, otherwise makes one, and echoes it in the response), `org_id` and `user_id` (bound by
+the auth dependency), and `run_id`, `org_id`, `user_id`, `worker_id` (a worker binds them around the tasks of each run it
+claims; in file mode the runner binds `run_id`). Every log line written while they are bound carries them.
+
+**Redaction safety net.** Secrets are kept out of logs in addition to the run-level redaction of stored data and prompts. A
+log record factory scrubs each record *when it is created*, so every handler (stderr, a collector, pytest's caplog) only sees
+clean text. It masks the message and its arguments, tracebacks, and string `extra` fields:
+
+* the password in any `scheme://user:password@host` URL (so a database URL in an error message is safe);
+* `X-API-Key`, `X-Admin-Token`, `Authorization`, `Cookie` / `Set-Cookie` header values, `Bearer ...` tokens, Google API keys,
+  and `password=`, `api_key=`, `secret=` style pairs;
+* the exact values of this process's own secrets (`GEMINI_API_KEY`, `VAULT_KEY`, `SESSION_SECRET`, `SIM_ADMIN_TOKEN`,
+  `METRICS_TOKEN`, `ACCESS_PASSWORD`, the database password), registered by `setup_logging`;
+* the vault secrets of every active run: the runner registers its `Redactor` when `run()` starts and removes it when it ends,
+  so a tool or library that logs a credential is masked as `[REDACTED:erp.password]`.
+
+This is a net, not a license to log secrets: it cannot catch a secret the code transforms first.
+
+### Metrics
+
+Every process keeps its own Prometheus registry (`prometheus-client`). **Scrape every process:** in database mode the run,
+tool, LLM and approval series come from the workers, the HTTP, WebSocket and queue-depth series from the API.
+
+| Metric | Type, labels | Meaning |
+| --- | --- | --- |
+| `centralign_runs_total` | counter `status` | finished runs by final status |
+| `centralign_run_duration_seconds` | histogram | active time of a run, human waits excluded |
+| `centralign_runs_active` | gauge | runs executing in this process |
+| `centralign_queue_depth` | gauge `org` | queued runs per org slug (an API process samples the DB every `QUEUE_SAMPLE_S`, 15 s; at most 50 orgs, the rest as `_other`; with several API copies use `max`, not `sum`) |
+| `centralign_queue_wait_seconds` | histogram | `queued_at` to the first claim |
+| `centralign_tool_calls_total` | counter `tool`, `ok` | tool executions |
+| `centralign_tool_duration_seconds` | histogram `tool` | tool time, retries included |
+| `centralign_llm_calls_total` | counter `model`, `outcome` | per attempt: `ok`, `rate_limited`, `network`, `transient`, `error` |
+| `centralign_llm_tokens_total` | counter `model`, `direction` | `input` / `output` tokens |
+| `centralign_llm_latency_seconds` | histogram `model` | time inside the provider call |
+| `centralign_llm_ratelimit_wait_seconds` | histogram | time spent in `limiter.acquire()` |
+| `centralign_approvals_total` | counter `kind`, `outcome` | `approved`, `denied`, `answered`, `expired`, `cancelled`, `no_response` |
+| `centralign_approval_wait_seconds` | histogram | how long a run waited for a person |
+| `centralign_worker_leases_lost_total` | counter | runs this worker lost to the reaper |
+| `centralign_runs_requeued_total` | counter `reason` | `worker_lost`, `shutdown` |
+| `centralign_runs_resumed_total` | counter | runs continued from a checkpoint |
+| `centralign_browser_contexts_active` | gauge | open isolated browser contexts |
+| `centralign_browser_relaunches_total` | counter | Chromium relaunches after a crash |
+| `centralign_ws_connections` | gauge | open WebSockets |
+| `centralign_http_requests_total` | counter `route`, `method`, `status` | `route` is the path template (`/api/runs/{run_id}`), unmatched paths share `unmatched` |
+| `centralign_http_request_duration_seconds` | histogram `route` | request time |
+
+The process, GC and Python platform collectors are exposed too.
+
+Where it is measured: `AgentRunner` (`RunObserver`, tool calls, approvals, the `_interact` wait), `ResilientLLM` (call
+attempts, tokens, latency, limiter wait), `jobqueue` (queue wait at claim, requeues, runs ended without a runner),
+`jobs.Worker` (lost leases), `BrowserPool` (contexts, relaunches), and one ASGI middleware (`worker/observability.py`) for
+HTTP and WebSockets.
+
+**Scraping.** API: `GET /metrics`. Workers: `python -m worker.jobs --metrics-port 9101` serves
+`http://127.0.0.1:9101/metrics` (loopback only; off unless the flag is given). Access to the API's `/metrics`:
+
+* an `Authorization: Bearer <METRICS_TOKEN>` header (for the scraper), or a signed-in admin/owner (database mode), or the
+  logged-in session when `ACCESS_PASSWORD` is set (file mode);
+* otherwise it is open **only for local development**: `DEPLOY_MODE` off, no `METRICS_TOKEN`, no `ACCESS_PASSWORD`. Any of
+  those makes it 401 without credentials (403 for a signed-in non-admin). A deployed server without a token therefore serves
+  `/metrics` to admins only.
+
+```yaml
+scrape_configs:
+  - job_name: centralign-api
+    metrics_path: /metrics
+    authorization: { credentials: <METRICS_TOKEN> }
+    static_configs: [{ targets: ["api-host:8000"] }]
+  - job_name: centralign-workers
+    static_configs: [{ targets: ["127.0.0.1:9101"] }]   # one target per worker process
+```
+
+### Health and the admin summary
+
+* `GET /healthz`: liveness, no dependencies, always fast.
+* `GET /readyz`: readiness. Database reachable, migrations at the Alembic head, and the simulated company answering its
+  `/healthz` (turn that off with `READINESS_CHECK_SIM=0`). `503` with a per-check reason (never a URL or credential) when
+  something is missing. A worker logs the same checks as a readiness line at start. `/api/health` is unchanged.
+* `GET /api/admin/system` (admin role, database mode): queue depth, running and waiting runs per org, the workers currently
+  holding a run (distinct `lease_owner` with a recent heartbeat), runs finished in the last 24 hours by status, and the p50 /
+  p95 run time from the `runs` table (wall time, approval waits included). An org admin sees their own org only; admins whose
+  e-mail is in `PLATFORM_ADMIN_EMAILS` see every org. The Admin page shows it as a read-only "System" card that refreshes
+  every 15 seconds.

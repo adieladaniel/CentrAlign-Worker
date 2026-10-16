@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # LLM
-    LLM_PROVIDER: Literal["gemini", "ollama", "fake"] = "gemini"
+    LLM_PROVIDER: Literal["gemini", "ollama", "fake", "policy"] = "gemini"
     GEMINI_API_KEY: str = ""
     # Fallback chain, tried in order; a model whose free-tier daily quota is gone is skipped for the day.
     GEMINI_MODELS: str = "gemini-3.5-flash,gemini-3.6-flash,gemini-3.7-flash,gemini-2.5-flash,gemini-3.8-flash,gemini-3.5-flash-lite,gemini-2.5-flash-lite"
@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     LLM_MIN_INTERVAL_S: float = 4.0
     # How long to keep retrying the model through a network outage (DNS/connection errors) before giving up.
     LLM_NETWORK_RETRY_S: float = 300.0
+    # Shared limits (database mode, see worker/llm/limiter.py and health_pg.py): one token bucket per API key, shared by
+    # every run of every process. Refill rate: LLM_REFILL_PER_S, else 1 / LLM_MIN_INTERVAL_S (0 = no rate limit).
+    LLM_BUCKET_CAPACITY: float = 2.0   # burst: calls that may start back to back before the refill rate applies (>= 1)
+    LLM_REFILL_PER_S: float = 0.0      # tokens added per second; 0 = derive from LLM_MIN_INTERVAL_S
+    LLM_HEALTH_CACHE_S: float = 3.0    # how often a process re-reads the shared "model exhausted" table
+    LLM_QUOTA_CACHE_S: float = 5.0     # how often a process re-reads an org's daily usage for the budget check
+    # LLM_PROVIDER=policy (worker/llm/policy.py): the deterministic stand-in used by the load test. Simulated model latency.
+    POLICY_THINK_MS: float = 800.0
 
     # Environment
     SIM_BASE_URL: str = "http://localhost:8001"
@@ -72,6 +80,23 @@ class Settings(BaseSettings):
     LOGIN_MAX_FAILURES_PER_IP: int = 20      # failures per client address and window before sign-in is blocked
     LOGIN_BACKOFF_BASE_S: float = 0.5        # a failed attempt is answered after base * 2^(failures-1) s (max 8 s)
 
+    # Job queue and workers (see worker/jobs.py). Database mode only.
+    WORKER_CONCURRENCY: int = 2          # runs one worker process executes at once
+    JOB_LEASE_S: float = 30.0            # a claimed run belongs to its worker this long; renewed every third of it
+    JOB_MAX_ATTEMPTS: int = 3            # claims before a run that keeps losing its worker is given up on
+    JOB_POLL_S: float = 2.0              # how often an idle worker looks for work when no wake-up arrives
+    JOB_REAPER_INTERVAL_S: float = 10.0  # how often each worker looks for runs whose lease expired
+    APPROVAL_POLL_S: float = 3.0         # fallback check of a waited-for approval when its NOTIFY is missed
+    LIVE_FALLBACK_POLL_S: float = 5.0    # fallback re-read of the events of a watched run when a NOTIFY is missed
+
+    # Observability (see worker/logging_setup.py, worker/metrics.py, worker/system_api.py)
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: Literal["", "json", "text"] = ""  # "" = json when DEPLOY_MODE is on, human-readable text otherwise
+    METRICS_TOKEN: str = ""              # bearer token for scrapers of GET /metrics (an admin session also works)
+    PLATFORM_ADMIN_EMAILS: str = ""      # comma separated: admins who see every org in GET /api/admin/system
+    QUEUE_SAMPLE_S: float = 15.0         # how often an API process samples the queue depth gauge from the database
+    READINESS_CHECK_SIM: bool = True     # /readyz also needs the simulated company (SIM_BASE_URL) to answer
+
     # Tools
     HTTP_ALLOWED_HOSTS: str = "localhost,127.0.0.1"
 
@@ -80,10 +105,27 @@ class Settings(BaseSettings):
     def _strip_key(cls, v: object) -> object:
         return v.strip() if isinstance(v, str) else v
 
+    @field_validator("LOG_FORMAT", mode="before")
+    @classmethod
+    def _lower_format(cls, v: object) -> object:
+        return v.strip().lower() if isinstance(v, str) else v
+
+    @property
+    def platform_admin_emails(self) -> set[str]:
+        """PLATFORM_ADMIN_EMAILS parsed into a lowercase set."""
+        return {e.strip().lower() for e in self.PLATFORM_ADMIN_EMAILS.split(",") if e.strip()}
+
     @property
     def db_auth(self) -> bool:
         """Are users, sessions and orgs in PostgreSQL (``AUTH_MODE=db``, or ``auto`` with ``DATABASE_URL`` set)?"""
         return self.AUTH_MODE == "db" or (self.AUTH_MODE == "auto" and bool(self.DATABASE_URL.strip()))
+
+    @property
+    def llm_refill_per_s(self) -> float:
+        """Refill rate of the shared LLM token bucket in calls per second (0 = unlimited)."""
+        if self.LLM_REFILL_PER_S > 0:
+            return self.LLM_REFILL_PER_S
+        return 1.0 / self.LLM_MIN_INTERVAL_S if self.LLM_MIN_INTERVAL_S > 0 else 0.0
 
     @property
     def sim_admin_headers(self) -> dict[str, str]:

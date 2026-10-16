@@ -3,6 +3,7 @@ admin API and the audit trail. Database mode against ``centralign_test``; the ap
 (see ``tests/dbapp.py``). The v1 file mode is covered by the existing server tests."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import datetime, timedelta, timezone
 
@@ -12,7 +13,7 @@ from sqlalchemy import select, text
 
 from dbapp import (
     ENTRY_TOKENS, ERP_PASSWORDS, MULTI_EMAIL, PASSWORD, audit_actions, call, finished, make_settings, new_client,
-    pending_request, reply, sign_in, start_run, wait_until, wire_script, write_script,
+    pending_request, reply, runner_of, sign_in, start_run, wait_until, wire_script, write_script,
 )
 from worker import auth as auth_module
 from worker.config import Settings
@@ -330,20 +331,28 @@ async def test_starting_a_run_records_who_started_it_and_needs_an_environment(wo
     assert blocked.status_code == 409 and "no environment" in blocked.json()["detail"].lower()
 
 
-async def test_one_run_at_a_time_per_org_but_orgs_are_independent(world, db_app):
+async def test_the_org_concurrency_limit_holds_runs_in_the_queue_and_orgs_are_independent(world, db_app):
     app, planner = db_app()
-    planner.add(*write_script())  # acme's run waits for approval
+    admin = await sign_in(app, "admin@acme.test")
+    assert (await admin.put("/api/admin/settings", json={"max_concurrent_runs": 1})).status_code == 200
+    planner.add(*write_script())  # acme's first run waits for approval and keeps its only slot
     acme_op = await sign_in(app, "operator@acme.test")
     first = await start_run(acme_op)
     await pending_request(acme_op, first)
-    busy = await (await sign_in(app, "operator2@acme.test")).post("/api/runs", json={"task": "second"})
-    assert busy.status_code == 409 and first in busy.json()["detail"]
+    second = await start_run(await sign_in(app, "operator2@acme.test"), "second")  # accepted, but it has to wait
+    await asyncio.sleep(0.3)
+    rows = {r["id"]: r for r in (await acme_op.get("/api/runs")).json()}
+    assert rows[first]["status"] == "waiting_approval" and rows[second]["status"] == "queued"
+    assert rows[second]["queue_position"] == 1 and rows[second]["active"] and rows[first]["queue_position"] is None
+    detail = (await acme_op.get(f"/api/runs/{second}")).json()
+    assert detail["status"] == "queued" and detail["queue_position"] == 1 and detail["pending"] == []
     globex = await sign_in(app, "operator@globex.test")
-    globex_run = await start_run(globex)  # not blocked by acme
+    globex_run = await start_run(globex)  # not held back by acme's limit
     assert globex_run != first
     await finished(globex, globex_run)
     assert (await acme_op.post(f"/api/runs/{first}/cancel")).status_code == 200
     await finished(acme_op, first)
+    assert (await finished(acme_op, second))["status"] == "needs_attention"  # the freed slot let it start (the default script gives up)
 
 
 # --------------------------------------------------------------------------- approvals
@@ -478,13 +487,13 @@ async def test_approval_mode_of_the_org_is_a_floor_and_limits_come_from_the_org(
     assert out.status_code == 200 and out.json()["settings"]["max_steps"] == 7
     operator = await sign_in(app, "operator@acme.test")
     looser = await start_run(operator, approval_mode="auto")  # asking for less confirmation than the org requires
-    session = app.state.sessions[looser]
-    assert session.runner.policy.mode == "confirm_writes"
-    assert (session.runner.settings.MAX_STEPS, session.runner.settings.RUN_TIMEOUT_S, session.broker.default_timeout) == (7, 120, 90)
     await finished(operator, looser)
+    runner = runner_of(app, looser)
+    assert runner.policy.mode == "confirm_writes"
+    assert (runner.settings.MAX_STEPS, runner.settings.RUN_TIMEOUT_S, runner.broker.default_timeout) == (7, 120, 90)
     stricter = await start_run(operator, approval_mode="confirm_all")
-    assert app.state.sessions[stricter].runner.policy.mode == "confirm_all"
     await finished(operator, stricter)
+    assert runner_of(app, stricter).policy.mode == "confirm_all"
 
 
 # --------------------------------------------------------------------------- quota
@@ -594,9 +603,10 @@ async def test_org_settings_are_validated_and_audited(world, db_app):
     app, _ = db_app()
     admin = await sign_in(app, "admin@acme.test")
     current = (await admin.get("/api/admin/settings")).json()["settings"]
-    assert current == {"approval_mode": "confirm_writes", "separation_of_duties": True, "sod_for_writes": False,
-                       "operators_can_approve": False, "approval_timeout_s": 3600, "max_runs_per_day": 50, "max_steps": 40,
-                       "run_timeout_s": 900}
+    assert {"approval_mode": "confirm_writes", "separation_of_duties": True, "sod_for_writes": False,
+            "operators_can_approve": False, "approval_timeout_s": 3600, "max_runs_per_day": 50, "max_steps": 40,
+            "run_timeout_s": 900}.items() <= current.items()  # settings added by later milestones are checked in their own tests
+    assert (current["max_tokens_per_day"], current["max_llm_calls_per_day"], current["gemini_models"]) == (2_000_000, 500, [])
     ok = await admin.put("/api/admin/settings", json={"approval_mode": "confirm_all", "max_steps": 25, "operators_can_approve": True})
     assert ok.status_code == 200 and ok.json()["changed"] == ["approval_mode", "max_steps", "operators_can_approve"]
     again = await admin.put("/api/admin/settings", json={"max_steps": 25})

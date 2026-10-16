@@ -4,7 +4,8 @@
 ``python scripts/bootstrap.py`` is the command line; ``bootstrap(url, ...)`` is the same thing as a function (the tests
 call it). Creating and dropping databases are done over a plain asyncpg connection to the ``postgres`` maintenance
 database, because ``CREATE DATABASE`` cannot run inside a transaction. Only the databases in ``DROPPABLE`` can be
-dropped, so a mistyped URL cannot destroy anything else.
+dropped (the two named ones, plus the throwaway ``centralign_test_*`` and ``centralign_load*`` databases of parallel
+test runs and ``scripts/loadtest.py``), so a mistyped URL cannot destroy anything else.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from worker.provisioning import ProvisioningError, provision_org_environment
 from worker.vault_pg import open_pg_vault
 
 DROPPABLE = frozenset({"centralign", "centralign_test"})
+THROWAWAY_PREFIXES = ("centralign_test_", "centralign_load")  # parallel test runs; the load test's own database
 
 
 def _quote(identifier: str) -> str:
@@ -58,11 +60,12 @@ async def create_database(url: str | URL) -> bool:
 
 
 async def drop_database(url: str | URL) -> bool:
-    """Drop the database named by ``url`` (open connections are terminated). Only ``centralign`` and
-    ``centralign_test`` are allowed. Returns True when something was dropped."""
+    """Drop the database named by ``url`` (open connections are terminated). Only ``centralign``, ``centralign_test`` and
+    the throwaway ``centralign_test_*`` / ``centralign_load*`` databases are allowed. Returns True when something was dropped."""
     url = normalize_url(url)
-    if url.database not in DROPPABLE:
-        raise ValueError(f"refusing to drop database '{url.database}': only {', '.join(sorted(DROPPABLE))} may be dropped")
+    if url.database not in DROPPABLE and not url.database.startswith(THROWAWAY_PREFIXES):
+        raise ValueError(f"refusing to drop database '{url.database}': only {', '.join(sorted(DROPPABLE))} "
+                         f"and {' / '.join(p + '*' for p in THROWAWAY_PREFIXES)} may be dropped")
     conn = await _admin_connection(url)
     try:
         if not await conn.fetchval("select 1 from pg_database where datname = $1", url.database):

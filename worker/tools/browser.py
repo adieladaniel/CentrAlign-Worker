@@ -111,6 +111,43 @@ def classify_element(name: str, role: str, *, submit: bool = False) -> Risk:
     return Risk.READ
 
 
+# Authentication only (read-only mode). A "login form" is a form whose visible submit controls are all READ (sign in /
+# log in / search ...) and that either holds a password input or has a sign-in button. The username field is recognised by
+# its accessible name (or type=email).
+_SIGN_IN_RE = re.compile(r"\b(sign|log)[ -]?in\b|\blogin\b", re.I)
+_LOGIN_USER_RE = re.compile(r"user|e-?mail|login", re.I)
+_LOGIN_FIELD_TYPES = frozenset({"", "text", "email", "password"})
+
+
+def _is_login_form_field(session: Any, ref: Any, *, username_only: bool = False) -> bool:
+    """Is element ``ref`` (in ``session``'s latest snapshot) a text/password input of a login form?
+
+    The single rule that lets the read-only verifier authenticate without being able to change anything:
+
+    * the element is an ``<input>`` of type text / email / password, inside a form;
+    * every visible submit control of that form is classified READ by ``classify_element`` (so "Sign in", "Log in" or
+      "Search" qualify; "Save", "Sign up", "Submit" or an unnamed submit do not), and there is at least one;
+    * the form holds a password input or one of its submit controls is a sign-in / log-in button (a plain search box
+      is therefore not a login form);
+    * with ``username_only``: the field is the username / email / login one (its type is email or its name matches).
+
+    Unknown elements (not in the snapshot cache) are never login fields."""
+    info = session.info(ref)
+    if not info or info.get("tag") != "input":
+        return False
+    itype = (info.get("type") or "text").lower()
+    if itype not in _LOGIN_FIELD_TYPES or (username_only and itype == "password"):
+        return False
+    submits = [str(n) for n in info.get("formSubmits") or []]
+    if not submits or any(classify_element(n, "button", submit=True) is not Risk.READ for n in submits):
+        return False
+    if not (info.get("formHasPassword") or any(_SIGN_IN_RE.search(n) for n in submits)):
+        return False
+    if username_only:
+        return itype == "email" or bool(_LOGIN_USER_RE.search(str(info.get("name") or "")))
+    return True
+
+
 def _is_enter(key: str) -> bool:
     return key.strip().split("+")[-1].lower() in ("enter", "return")
 
@@ -761,7 +798,12 @@ class TypeTool(BrowserTool):
         return f'Type "{shown}" into {self._element_desc(args, ctx)} on {self._page_path(ctx)}{tail}'
 
     def refusal(self, args, session):
-        return "Typing is not allowed in read-only mode."
+        if args.get("submit"):
+            return "Typing with submit=true is not allowed in read-only mode."
+        if not _is_login_form_field(session, args.get("ref"), username_only=True):
+            return ("Typing is not allowed in read-only mode, except the username/email field of a login form "
+                    "(and then without submit).")
+        return None
 
     async def execute(self, args, ctx, session):
         locator = await session.locate(args["ref"])

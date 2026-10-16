@@ -20,3 +20,5 @@ sqlalchemy[asyncio]>=2.0
 asyncpg
 alembic
 argon2-cffi
+prometheus-client
+psutil

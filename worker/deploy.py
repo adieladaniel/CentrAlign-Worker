@@ -23,8 +23,9 @@ from worker.config import Settings
 AUTH_COOKIE = "ca_auth"
 SESSION_COOKIE = "ca_session"  # the multi-user session cookie (worker/auth.py): never forwarded to the sim
 AUTH_MAX_AGE_S = 7 * 24 * 3600
-# Paths reachable without a session (health check for the platform, the login flow itself).
-PUBLIC_PATHS = frozenset({"/login", "/logout", "/api/health"})
+# Paths reachable without a session (health checks for the platform, the login flow itself). /metrics checks its own
+# credentials (metrics token or a signed-in session), see worker/system_api.py.
+PUBLIC_PATHS = frozenset({"/login", "/logout", "/api/health", "/healthz", "/readyz", "/metrics"})
 # Sim paths exposed through the proxy. /company is an alias for the sim's landing page "/". /t/<token>/ is a tenant's
 # entry link: the sim answers it with a `sim_tenant` cookie (forwarded like every other sim cookie) and a redirect.
 PROXY_PREFIXES = ("mail", "portal", "erp", "static", "t")

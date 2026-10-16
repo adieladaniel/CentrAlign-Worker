@@ -18,6 +18,7 @@ from worker.tools.base import Risk, ToolContext
 from worker.tools.browser import (
     BrowserSession,
     browser_tools,
+    _is_login_form_field,
     classify_element,
     close_browser,
     register_browser_tools,
@@ -475,6 +476,78 @@ async def test_read_only_mode(tools, ctx, base_url):
     assert (await call(tools, ctx, "browser_scroll", direction="down")).ok
     assert (await call(tools, ctx, "browser_back")).ok
     assert (await call(tools, ctx, "browser_screenshot", label="ro")).ok
+
+
+class _FakeSession:
+    """Just enough of a BrowserSession for ``_is_login_form_field``: ``info(ref)`` over given snapshot records."""
+
+    def __init__(self, **records: dict) -> None:
+        self.records = {int(k[1:]): v for k, v in records.items()}
+
+    def info(self, ref):
+        return self.records.get(ref)
+
+
+def _input(name: str, type: str = "text", submits: tuple = ("Sign in",), password: bool = True, **extra) -> dict:
+    record = {"tag": "input", "role": "textbox", "name": name, "type": type, "inForm": True, "formSubmits": list(submits)}
+    if password:
+        record["formHasPassword"] = True
+    return {**record, **extra}
+
+
+def test_is_login_form_field_rule():
+    session = _FakeSession(
+        r1=_input("Username"), r2=_input("Password", "password"), r3=_input("E-mail address", "email"),
+        r4=_input("Login"), r5=_input("Account number"),                                   # not a username-like name
+        r6=_input("Username", submits=("Save bill",)), r7=_input("Username", submits=("Sign in", "Sign up")),
+        r8=_input("Username", submits=()), r9=_input("Username", submits=("Submit",)),
+        r10=_input("Search invoices", submits=("Search",), password=False),                # a search box is not a login form
+        r11=_input("Username", submits=("Log in",), password=False),                       # sign-in button without a password field
+        r12={"tag": "textarea", "role": "textbox", "name": "Username", "formSubmits": ["Sign in"], "formHasPassword": True},
+        r13={"tag": "input", "role": "checkbox", "name": "Remember me", "type": "checkbox", "formSubmits": ["Sign in"]},
+        r14={"tag": "input", "role": "textbox", "name": "Username", "type": "text"},       # not inside a form
+        r15=_input("Pay now", submits=("Pay now",)), r16=_input("Username", "hidden"),
+    )
+    login = lambda ref, **kw: _is_login_form_field(session, ref, **kw)  # noqa: E731
+    # any text/password input of a sign-in form
+    assert login(1) and login(2) and login(3) and login(4) and login(5) and login(11)
+    # username-like fields only (never the password field)
+    assert [login(r, username_only=True) for r in (1, 2, 3, 4, 5, 11)] == [True, False, True, True, False, True]
+    # forms that can change something, or that have no sign-in character, are not login forms
+    assert not any(login(r) for r in (6, 7, 8, 9, 10, 15))
+    # not an <input> text/email/password, not in a form, unknown ref
+    assert not any(login(r) for r in (12, 13, 14, 16, 99))
+
+
+async def test_read_only_mode_allows_authentication_only(tools, ctx, base_url):
+    obs = (await call(tools, ctx, "browser_navigate", url=f"{base_url}/login.html")).observation
+    ctx.extras["read_only"] = True
+    page = ctx.extras["browser"].page
+    user, password = ref_of(obs, 'textbox "Username"'), ref_of(obs, 'textbox "Password"')
+
+    # the username of the sign-in form may be typed (without submit); the password may not be typed with browser_type
+    typed = await call(tools, ctx, "browser_type", ref=user, text="ap.clerk")
+    assert typed.ok, typed.observation
+    assert await page.input_value("#u") == "ap.clerk"
+    for kwargs in ({"ref": password, "text": "hunter2"}, {"ref": user, "text": "x", "submit": True}):
+        refused = await call(tools, ctx, "browser_type", **kwargs)
+        assert not refused.ok and refused.error == "read_only_refused" and "read-only" in refused.observation
+    assert await page.input_value("#p") == "" and await page.input_value("#u") == "ap.clerk"
+
+    # every other field is refused: search box, the sign-up form's e-mail (name looks like a login, form is not one), a note
+    for needle in ('textbox "Search invoices"', 'textbox "Email address"', 'textbox "Note"'):
+        refused = await call(tools, ctx, "browser_type", ref=ref_of(obs, needle), text="whatever")
+        assert not refused.ok and refused.error == "read_only_refused", needle
+    assert [await page.input_value(sel) for sel in ("#em", "#nt")] == ["", ""]
+    select_like = await call(tools, ctx, "browser_select", ref=user, option="x")
+    assert not select_like.ok and select_like.error == "read_only_refused"
+
+    # the sign-in click is READ and works; writing clicks stay refused
+    signed = await call(tools, ctx, "browser_click", ref=ref_of(obs, 'button "Sign in"'))
+    assert signed.ok and "Signed in as ap.clerk" in signed.observation
+    for name in ("Sign up", "Save note", "Delete account"):
+        refused = await call(tools, ctx, "browser_click", ref=ref_of(obs, f'button "{name}"'))
+        assert not refused.ok and refused.error == "read_only_refused", name
 
 
 def test_read_only_safe_flags_and_registry_subset():

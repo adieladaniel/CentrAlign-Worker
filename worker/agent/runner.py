@@ -10,6 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from worker import metrics
 from worker.agent.broker import InteractionBroker
 from worker.agent.context import build_messages, compress_step
 from worker.agent.guards import GuardEvent, Guards, counts_toward_budget
@@ -36,7 +37,8 @@ from worker.agent.state import (
 from worker.agent.thoughts import THOUGHT_LIMIT, clean_thought
 from worker.agent.verifier import Verdict, Verifier
 from worker.config import Settings
-from worker.llm.base import LLMClient, LLMError, LLMResponse, ToolCall
+from worker.llm.base import LLMClient, LLMError, LLMResponse, QuotaExceededError, ToolCall
+from worker.logging_setup import clear_run_redactor, log_context, register_run_redactor
 from worker.redaction import RedactingStore, Redactor
 from worker.store import FileRunStore, RunStore
 from worker.tools.base import Risk, Tool, ToolContext, ToolResult
@@ -79,6 +81,9 @@ class AgentRunner:
 
     ``clock`` is the monotonic time source of the wall-clock guard (injectable for tests).
 
+    ``precreated``: the run already exists in the store (a queued run claimed by a worker, ``state`` loaded from it), so
+    ``run`` updates it instead of creating it.
+
     ``vault_scope`` (see ``worker/vault.py``) gives the run credentials it can use through the secret tools without ever
     seeing them. When it holds any, a ``Redactor`` built from its secret values scrubs everything that is stored (the
     store is wrapped in a ``RedactingStore``), emitted, shown to approvers or sent to the model.
@@ -98,6 +103,7 @@ class AgentRunner:
         clock: Callable[[], float] = time.monotonic,
         state: RunState | None = None,
         vault_scope: VaultScope | None = None,
+        precreated: bool = False,
     ):
         self.llm, self.registry, self.settings, self.broker = llm, registry, settings, broker
         self.store: RunStore = store or FileRunStore(settings.RUNS_DIR)
@@ -107,6 +113,7 @@ class AgentRunner:
         if self.redactor:
             self.store = RedactingStore(self.store, self.redactor)
         self._clock = clock
+        self._precreated = precreated
         self.state = state or RunState(run_id=run_id or uuid.uuid4().hex, task=task)  # ``state``: see ``resume``
         if self.redactor:
             self.state.task = self.redactor.redact(self.state.task)
@@ -133,12 +140,14 @@ class AgentRunner:
         self._text_only = 0
         self._force_tool = False
         self._resume_count = 0
+        self._knowledge: list[dict] = []  # organization memories recalled for this run (see ``_recall_org_memory``)
         self._nudges: list[str] = []
         self._feedback = ""
         self._verify_failures = 0
         self._claim: dict | None = None
         self._verdict: Verdict | None = None
         self._approvals = {"requested": 0, "approved": 0, "denied": 0}
+        self._obs = metrics.RunObserver()  # active gauge, run duration, human waits (worker/metrics.py)
         if hasattr(llm, "on_retry"):  # ResilientLLM: surface network waits in the UI and let cancel interrupt them
             llm.on_retry = self._on_llm_retry
 
@@ -195,15 +204,31 @@ class AgentRunner:
     # ------------------------------------------------------------------ lifecycle
 
     async def run(self) -> RunState:
-        """Execute the task (or continue a resumed one) and return the final state, persisted in the store."""
+        """Execute the task (or continue a resumed one) and return the final state, persisted in the store.
+
+        While it runs, log lines carry the run id, and the run's vault secrets are masked in every log record."""
+        with log_context(run_id=self.state.run_id):
+            register_run_redactor(self.state.run_id, self.redactor)
+            self._obs.begin(resumed=bool(self._resume_count))
+            try:
+                return await self._run()
+            finally:
+                self._obs.close()
+                clear_run_redactor(self.state.run_id)
+
+    async def _run(self) -> RunState:
         self.state.status = "running"
         if self._resume_count:
             await self._checkpoint()
             await self._emit("run_resumed", {"resume_count": self._resume_count, "message": RESUME_NOTE})
         else:
-            await self.store.create_run(self.state)
+            if self._precreated:
+                await self.store.save_state(self.state)
+            else:
+                await self.store.create_run(self.state)
             await self.store.save_runtime(self.state.run_id, self._runtime())
             await self._emit("run_started", {"task": self.state.task, "approval_mode": self.policy.mode})
+        await self._recall_org_memory()
         status, reason = "failed", ""
         try:
             await self._loop()
@@ -218,6 +243,22 @@ class AgentRunner:
         await self._finish_run(status, reason)
         return self.state
 
+    async def _recall_org_memory(self) -> None:
+        """Before the first model call: fetch the organization knowledge that matches the task (once per run, and again
+        after a resume) and keep it for the state block. Memory is an optional extra (``ctx.extras["org_memory"]``, an
+        object with an async ``recall``; absent in file mode or when the org turned it off): a failure never stops the run."""
+        memory, limit = self.ctx.extras.get("org_memory"), int(self.ctx.extras.get("org_memory_limit") or 0)
+        self._knowledge = []
+        if memory is None or limit <= 0:
+            return
+        try:
+            self._knowledge = self._redact(await memory.recall(self.state.task, limit=limit))
+        except Exception:  # noqa: BLE001
+            log.exception("recalling organization memory failed")
+            return
+        if self._knowledge:
+            await self._emit("memory_recalled", {"keys": [item["key"] for item in self._knowledge]})
+
     async def _loop(self) -> None:
         tool_names = self.registry.names()
         specs = self.registry.specs()
@@ -225,13 +266,15 @@ class AgentRunner:
             await self._check_stop()
             messages = build_messages(
                 self.state, self.settings, tool_names, nudges=self._nudges, feedback=self._feedback,
-                vault_credentials=self._vault_public,
+                vault_credentials=self._vault_public, knowledge=self._knowledge,
             )
             if self.redactor:  # last line of defense: whatever got into the state, the model never receives a secret
                 messages = self.redactor.redact_messages(messages)
             self._nudges = []
             try:
                 response = await self.llm.complete(messages, specs, tool_choice="any" if self._force_tool else "auto")
+            except QuotaExceededError as err:  # the org's own daily budget, not a provider problem: say so plainly
+                raise _Stop("needs_attention", str(err)) from err
             except LLMError as err:
                 raise _Stop("needs_attention", f"The language model could not be reached: {err}") from err
             await self._account(response)
@@ -314,6 +357,7 @@ class AgentRunner:
         started = time.monotonic()
         result = await execute_with_retry(tool, step.args, self.ctx)
         step.duration_ms = int((time.monotonic() - started) * 1000)
+        metrics.tool_call(tool.name, result.ok, step.duration_ms / 1000)
         step.ok, step.error, step.evidence = result.ok, result.error, list(result.evidence)
         step.observation = truncate(result.observation, STORED_OBSERVATION_LIMIT)
         match = _RETRY_NOTE.search(result.observation)
@@ -352,7 +396,8 @@ class AgentRunner:
         response = await self._interact("approval", payload)
         response = response if isinstance(response, dict) else {}
         approved = bool(response.get("approved"))
-        note = str(response.get("note") or ("" if response else "no response received"))
+        no_answer = not response
+        note = str(response.get("note") or (self._no_response_reason() if no_answer else ""))
         self.policy.record_response(tool, risk, response)
         self._approvals["approved" if approved else "denied"] += 1
         by = response.get("by") if isinstance(response.get("by"), dict) else {}  # who answered (multi-user mode)
@@ -360,13 +405,21 @@ class AgentRunner:
         await self._add_step(Step(kind="approval", tool=tool.name, args=step.args, risk=risk.value, ok=approved,
                             thought=note, turn=self._turn,
                             observation=f"{'APPROVED' if approved else 'DENIED'}{who}: {action}"))
+        if no_answer and getattr(self.broker, "last_expired", False):  # nobody answered in time: stop, do not guess
+            raise _Stop("needs_attention", f"The approval for '{action}' got no answer ({note}). "
+                                           "Stopped with partial progress.")
         return approved, note
+
+    def _no_response_reason(self) -> str:
+        """Why a request got no answer, as far as the broker knows (timeout, expiry, cancellation)."""
+        return getattr(self.broker, "no_response_reason", "") or "no response received"
 
     async def _interact(self, kind: str, payload: dict) -> Any:
         """Ask the human via the broker (kind: "approval" | "question"). Returns None on timeout or cancellation."""
         payload = self._redact(payload)
         approval = kind == "approval"
         self.guards.pause_clock()  # waiting for a human does not count against the run's time limit
+        self._obs.wait_started()
         self.state.status = "waiting_approval" if approval else "waiting_user"
         await self._checkpoint()
 
@@ -386,9 +439,20 @@ class AgentRunner:
             if self.state.status in ("waiting_approval", "waiting_user"):
                 self.state.status = "running"
             self.guards.resume_clock()
-        await self._emit("approval_resolved" if approval else "question_answered",
-                         {"response": response, "answered": response is not None})
+        metrics.approval_resolved(kind, self._wait_outcome(kind, response), self._obs.wait_ended())
+        resolved: dict[str, Any] = {"response": response, "answered": response is not None}
+        if response is None and getattr(self.broker, "no_response_reason", ""):
+            resolved["reason"] = self.broker.no_response_reason
+        await self._emit("approval_resolved" if approval else "question_answered", resolved)
         return response
+
+    def _wait_outcome(self, kind: str, response: Any) -> str:
+        """How a request for a human ended, as a metric label."""
+        if isinstance(response, dict) and response:
+            return ("approved" if response.get("approved") else "denied") if kind == "approval" else "answered"
+        if getattr(self.broker, "last_expired", False):
+            return "expired"
+        return "cancelled" if self._cancelled.is_set() else "no_response"
 
     # ------------------------------------------------------------------ finish and verification
 
@@ -433,6 +497,7 @@ class AgentRunner:
         return verdict
 
     async def _record_verify_step(self, tool: str, args: dict, result: ToolResult, duration_ms: int) -> None:
+        metrics.tool_call(tool, result.ok, duration_ms / 1000)
         step = Step(kind="verify", tool=tool, args=args, ok=result.ok, error=result.error, evidence=list(result.evidence),
                     observation=truncate(result.observation, STORED_OBSERVATION_LIMIT), duration_ms=duration_ms)
         await self._finish_step(step, phase="verify", feed_guards=False)
@@ -567,6 +632,7 @@ class AgentRunner:
     async def _finish_run(self, status: str, reason: str) -> None:
         assert status in TERMINAL_STATUSES
         await self._close_browser()
+        self._obs.finished(status)
         report = self._redact(build_report(self.state, status=status, claim=self._claim, verdict=self._verdict,
                                            reason=reason, approvals=self._approvals, run_dir=self.run_dir))
         self.state.status, self.state.final_report, self.state.finished_at = status, report, utcnow()

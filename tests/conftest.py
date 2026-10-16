@@ -26,7 +26,8 @@ from worker.store import FileRunStore
 from worker.store_pg import PgRunStore
 from worker.tools.browser_pool import BrowserPool
 
-TEST_DATABASE = "centralign_test"
+# CENTRALIGN_TEST_DB=centralign_test_<suffix> lets two pytest runs (e.g. two developers or agents) use separate databases.
+TEST_DATABASE = os.environ.get("CENTRALIGN_TEST_DB", "centralign_test")
 # Fixtures that bind a test to the session event loop: Playwright objects and asyncpg pools belong to the loop that
 # made them (see ``pytest_collection_modifyitems``).
 SESSION_LOOP_FIXTURES = ("browser_pool", "pg_engine", "store_kind")
@@ -148,9 +149,10 @@ def pg_required_engine(pg_engine):
 @pytest_asyncio.fixture(loop_scope="session")
 async def world(pg_sessionmaker):
     """Two seeded orgs (acme, globex) with users in every role; see ``tests/dbapp.py``."""
-    from dbapp import seed_world
+    from dbapp import seed_world, shutdown_all
 
-    return await seed_world(pg_sessionmaker)
+    yield await seed_world(pg_sessionmaker)
+    await shutdown_all()
 
 
 @pytest.fixture

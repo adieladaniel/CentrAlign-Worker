@@ -11,7 +11,8 @@ of calls, so waiting is useless: when a model reports a daily quota error the ru
 * per-minute rate limits and other errors propagate to ResilientLLM (wait and retry the same model).
 
 The memory of unusable models lives in a ``ModelHealth`` that is shared by the whole process (the dashboard
-creates a new client for every run).
+creates a new client for every run). In database mode it is a ``PgModelHealth`` (worker/llm/health_pg.py) shared by
+every process; ``refresh()`` / ``flush()`` are its async hooks and no-ops here.
 """
 from __future__ import annotations
 
@@ -93,6 +94,12 @@ class ModelHealth:
     def clear(self) -> None:
         self._bad.clear()
 
+    async def refresh(self) -> None:
+        """Bring the in-memory view up to date with the shared store (nothing to do for a process-local health)."""
+
+    async def flush(self) -> None:
+        """Wait until changes made through ``mark_*`` reached the shared store (nothing to do here)."""
+
 
 DEFAULT_HEALTH = ModelHealth()  # shared by every FailoverLLM in the process unless a test passes its own
 
@@ -143,6 +150,7 @@ class FailoverLLM(LLMClient):
         temperature: float = 0.2,
         tool_choice: Literal["auto", "any", "none"] = "auto",
     ) -> LLMResponse:
+        await self.health.refresh()
         for model in self.models:
             if self.health.reason(model) is not None:
                 continue
@@ -152,6 +160,7 @@ class FailoverLLM(LLMClient):
             except QuotaExhaustedError as err:
                 log.warning("model %s: daily quota exhausted, failing over", model)
                 self.health.mark_exhausted(model)
+                await self.health.flush()
                 err.model = err.model or model
                 continue
             except ModelUnavailableError as err:
@@ -160,6 +169,7 @@ class FailoverLLM(LLMClient):
                     self.health.mark_unavailable(model, self.unavailable_cooldown_s)
                 else:
                     self.health.mark_missing(model)
+                await self.health.flush()
                 continue
             self._note_used(model)
             return response

@@ -86,6 +86,7 @@ code, pre, .mono { font-family: var(--mono); }
 .pill-failed { background: #ef4444; color: #fff; }
 .pill-attention { background: #f59e0b; color: #2a1a00; }
 .pill-cancelled { background: #94a3b8; color: #0f172a; }
+.pill-queued { background: rgba(255, 255, 255, 0.22); color: #fff; }
 @keyframes pulse-pill { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
 
 /* ---------------------------------------------------------------- layout */
@@ -177,6 +178,7 @@ textarea:focus, select:focus, input[type="text"]:focus { outline: 2px solid var(
 .dot-h-failed { background: #ef4444; }
 .dot-h-needs_attention { background: #f59e0b; }
 .dot-h-cancelled { background: #94a3b8; }
+.dot-h-queued { background: #94a3b8; animation: pulse-pill 1.8s infinite; }
 .dot-h-running, .dot-h-pending, .dot-h-verifying { background: var(--brand); animation: pulse-pill 1.2s infinite; }
 .dot-h-waiting_approval, .dot-h-waiting_user { background: #f59e0b; animation: pulse-pill 1.2s infinite; }
 
@@ -461,3 +463,37 @@ button.topbar-link { background: none; }
   .page { overflow: visible; }
 }
 body.signed-out #run-pill, body.signed-out #model-badge, body.signed-out .sim-status { display: none; }
+
+/* LLM usage card (admin page) */
+.usage-meter { margin: 6px 0 12px; }
+.usage-meter-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+.usage-track { height: 10px; background: var(--soft); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.usage-fill { height: 100%; background: var(--brand); border-radius: 999px; }
+.usage-fill.warn { background: var(--amber); }
+.usage-fill.over { background: var(--red); }
+.usage-bar { fill: var(--brand); }
+.usage-split { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 20px; margin-top: 14px; }
+
+/* Job queue and approvals inbox */
+.nav-badge { margin-left: 7px; min-width: 18px; padding: 1px 6px; border-radius: 999px; background: #f59e0b; color: #2a1a00; font-size: 11.5px; font-weight: 800; display: inline-block; text-align: center; }
+.approvals-list { display: flex; flex-direction: column; gap: 14px; margin-top: 10px; }
+.approval-item { border: 1px solid var(--amber-line); background: var(--amber-bg); border-radius: 12px; padding: 14px 16px; }
+.approval-item.question { border-color: var(--line); background: var(--soft); }
+.approval-head { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; justify-content: space-between; }
+.approval-run { font-size: 13px; }
+.approval-run button { background: none; border: 0; padding: 0; color: var(--brand); font-weight: 650; text-align: left; }
+.approval-run button:hover { text-decoration: underline; }
+.approval-meta { font-size: 12.5px; color: var(--muted); }
+.approval-meta .soon { color: var(--red); font-weight: 650; }
+.approval-item .pending-action { margin: 8px 0 4px; }
+.approval-item .kv { background: rgba(255, 255, 255, 0.7); border-radius: 8px; }
+
+/* organization memory page */
+.memory-table td.mem-content { max-width: 440px; overflow-wrap: anywhere; }
+.memory-table td.mem-content textarea { width: 100%; min-height: 70px; }
+.memory-table tr.expired td { color: var(--muted); }
+.memory-table .mem-edit-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 6px; }
+.memory-table .mem-actions { display: flex; gap: 6px; white-space: nowrap; }
+.memory-table a.run-link { color: var(--brand); text-decoration: none; font-family: var(--mono); font-size: 12px; }
+.memory-table a.run-link:hover { text-decoration: underline; }
+.durable-tag { margin-left: 6px; font-family: inherit; }

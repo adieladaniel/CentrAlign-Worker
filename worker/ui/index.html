@@ -16,6 +16,8 @@
     </div>
     <nav id="main-nav" class="main-nav hidden" aria-label="Pages">
       <button class="nav-btn active" type="button" data-view="dashboard">Dashboard</button>
+      <button class="nav-btn hidden" type="button" data-view="approvals" id="nav-approvals">Approvals<span id="approvals-badge" class="nav-badge hidden" title="Approvals waiting for you">0</span></button>
+      <button class="nav-btn hidden" type="button" data-view="memory" id="nav-memory">Memory</button>
       <button class="nav-btn hidden" type="button" data-view="admin">Admin</button>
       <button class="nav-btn hidden" type="button" data-view="credentials">Credentials</button>
     </nav>
@@ -131,6 +133,33 @@
     </aside>
   </main>
 
+  <!-- Multi-user mode only: the approvals inbox (filled by approvals.js) -->
+  <section id="view-approvals" class="page hidden" aria-label="Approvals">
+    <div class="page-inner">
+      <div class="card">
+        <div class="card-head"><h2>Approvals waiting</h2><span id="approvals-live" class="muted small"></span></div>
+        <p class="hint">Everything the organization's agents are waiting on, across all runs. Answer here, or open the run to see its timeline.</p>
+        <div id="approvals-list" class="approvals-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Multi-user mode only: organization memory (filled by memory.js) -->
+  <section id="view-memory" class="page hidden" aria-label="Organization memory">
+    <div class="page-inner">
+      <div class="card">
+        <div class="card-head"><h2>Organization memory</h2><button id="memory-expire" class="btn btn-small-ghost hidden" type="button" title="Expire the notes that nobody has used for the retention period">Expire stale notes now</button></div>
+        <p class="hint">Reusable how-to knowledge about this organization's systems, learned by its agents. A note is saved <b>only when a run ends successfully after the independent audit passed</b>: failed, blocked or cancelled runs write nothing, and anything that contained a secret, looks like task data or is too long is dropped. Agents recall the best matches for each task (keyword search) and are told to verify them. <span id="memory-policy"></span></p>
+        <form id="memory-search" class="inline-form" autocomplete="off">
+          <label class="field"><span class="field-label">Search</span><input id="memory-q" type="search" maxlength="200" placeholder="e.g. erp date format"></label>
+          <label class="field"><span class="field-label">Scope</span><input id="memory-scope" type="text" maxlength="80" placeholder="e.g. erp"></label>
+          <button class="btn btn-primary fit" type="submit">Search</button>
+        </form>
+        <div class="table-wrap"><table id="memory-table" class="data-table memory-table"></table></div>
+      </div>
+    </div>
+  </section>
+
   <!-- Multi-user mode only: Admin and Credentials pages (filled by admin.js) -->
   <section id="view-admin" class="page hidden" aria-label="Administration">
     <div class="page-inner">
@@ -210,5 +239,7 @@
 
   <script src="/ui/app.js"></script>
   <script src="/ui/admin.js"></script>
+  <script src="/ui/approvals.js"></script>
+  <script src="/ui/memory.js"></script>
 </body>
 </html>

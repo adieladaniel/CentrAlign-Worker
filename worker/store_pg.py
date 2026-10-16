@@ -46,7 +46,7 @@ def _step_row(run_id: uuid.UUID, step: Step) -> dict[str, Any]:
 
 def _fact_row(run_id: uuid.UUID, fact: Fact) -> dict[str, Any]:
     return {"run_id": run_id, "key": clean_text(fact.key), "value": clean_text(fact.value),
-            "source": clean_text(fact.source), "step": fact.step}
+            "source": clean_text(fact.source), "step": fact.step, "durable": fact.durable, "scope": clean_text(fact.scope)}
 
 
 def _header(state: RunState) -> dict[str, Any]:
@@ -153,7 +153,8 @@ class PgRunStore:
             row = _fact_row(rid, fact)
             await session.execute(pg_insert(RunFact).values(**row).on_conflict_do_update(
                 index_elements=[RunFact.run_id, RunFact.key],
-                set_={"value": row["value"], "source": row["source"], "step": row["step"]}))  # ``ord`` keeps its place
+                set_={"value": row["value"], "source": row["source"], "step": row["step"], "durable": row["durable"],
+                      "scope": row["scope"]}))  # ``ord`` keeps its place
 
     async def load_state(self, run_id: str) -> RunState | None:
         rid = maybe_uuid(run_id)
@@ -175,7 +176,8 @@ class PgRunStore:
                        "tool": s.tool, "args": s.args, "risk": s.risk, "ok": s.ok, "observation": s.observation,
                        "error": s.error, "evidence": s.evidence, "duration_ms": s.duration_ms, "retries": s.retries,
                        "timestamp": iso_ts(s.ts), "turn": s.turn, "tool_call_id": s.tool_call_id} for s in steps],
-            "facts": {f.key: {"key": f.key, "value": f.value, "source": f.source, "step": f.step} for f in facts},
+            "facts": {f.key: {"key": f.key, "value": f.value, "source": f.source, "step": f.step, "durable": f.durable,
+                              "scope": f.scope} for f in facts},
         }
         return RunState.from_dict(data)
 
@@ -240,6 +242,14 @@ class PgRunStore:
             await session.execute(insert(RunEvent).values(run_id=rid, seq=seq, type=event_type, payload=payload))
             await session.execute(select(func.pg_notify(NOTIFY_CHANNEL, f"{rid.hex}:{seq}")))
         return seq
+
+    async def last_event_seq(self, run_id: str) -> int:
+        """The newest event number of the run (0 for none, unknown or foreign runs)."""
+        rid = maybe_uuid(run_id)
+        if rid is None:
+            return 0
+        async with self._tx() as session:
+            return await session.scalar(select(Run.event_seq).where(Run.id == rid, Run.org_id == self.org_id)) or 0
 
     async def read_events(self, run_id: str, after_seq: int = 0) -> list[dict]:
         rid = maybe_uuid(run_id)

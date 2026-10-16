@@ -54,6 +54,7 @@ DEFAULT_ORG_SETTINGS: dict[str, Any] = {
     "approval_mode": "confirm_writes",   # auto | confirm_writes | confirm_all
     "separation_of_duties": True,        # irreversible actions need an approver other than the run's creator
     "approval_timeout_s": 3600,          # a pending approval expires after this long
+    "max_concurrent_runs": 2,            # runs of this org executing at once; further runs wait in the queue
     "limits": {"runs_per_day": 0, "tokens_per_day": 0},  # 0 = unlimited
     "models": [],                        # model fallback chain; empty = the deployment default
 }
@@ -176,6 +177,9 @@ class Run(Base):
         # The job queue: workers claim the highest priority, oldest queued run (FOR UPDATE SKIP LOCKED).
         Index("ix_runs_queue", text("priority desc"), "queued_at", postgresql_where=text("status = 'queued'")),
         Index("ix_runs_lease_expires_at", "lease_expires_at", postgresql_where=text("lease_owner is not null")),
+        # The per-org concurrency check at claim time counts the org's runs that a worker holds.
+        Index("ix_runs_org_id_active", "org_id",
+              postgresql_where=text("status in ('running', 'waiting_approval', 'waiting_user', 'verifying')")),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -201,6 +205,8 @@ class Run(Base):
     attempts: Mapped[int] = mapped_column(Integer, server_default="0")
     cancel_requested: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     priority: Mapped[int] = mapped_column(Integer, server_default="0")
+    options: Mapped[dict] = jsonb({})  # how the run was requested (e.g. {"headless": true}); read by the worker that claims it
+    resume_requested: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))  # the next claim continues the run
     event_seq: Mapped[int] = mapped_column(Integer, server_default="0")  # last event number handed out
 
 
@@ -238,6 +244,8 @@ class RunFact(Base):
     value: Mapped[str] = mapped_column(Text, server_default="")
     source: Mapped[str] = mapped_column(Text, server_default="")
     step: Mapped[int] = mapped_column(Integer, server_default="0")
+    durable: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))  # candidate for organization memory
+    scope: Mapped[str] = mapped_column(Text, server_default="")  # the system a durable fact concerns, e.g. "erp"
     ord: Mapped[int] = mapped_column(BigInteger, Identity())
 
 
@@ -275,6 +283,7 @@ class Approval(Base):
     responded_at: Mapped[datetime | None] = ts_col()
     responded_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     response: Mapped[dict | None] = jsonb()
+    consumed_at: Mapped[datetime | None] = ts_col()  # when the waiting run took the answer (a re-attaching run must not reuse it twice)
 
 
 # --------------------------------------------------------------------------- memory and vault
@@ -283,11 +292,13 @@ class Approval(Base):
 class OrgMemory(Base):
     """Long-term, org-wide knowledge written by verified runs and recalled by keyword (full-text) search.
 
-    ``search`` is a generated tsvector over key (weight A), content (B) and scope (C), indexed with GIN."""
+    ``search`` is a generated tsvector over key (weight A), content (B) and scope (C), indexed with GIN. A key is unique
+    per org, case-insensitively: saving it again updates the row (see ``worker/memory_store.py``)."""
 
     __tablename__ = "org_memory"
     __table_args__ = (Index("ix_org_memory_org_id", "org_id"),
-                      Index("ix_org_memory_search", "search", postgresql_using="gin"))
+                      Index("ix_org_memory_search", "search", postgresql_using="gin"),
+                      Index("uq_org_memory_org_key_lower", "org_id", func.lower(text("key")), unique=True))
 
     id: Mapped[uuid.UUID] = uuid_pk()
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
@@ -302,6 +313,7 @@ class OrgMemory(Base):
     last_used_at: Mapped[datetime | None] = ts_col()
     expires_at: Mapped[datetime | None] = ts_col()
     created_at: Mapped[datetime] = now_col()
+    updated_at: Mapped[datetime] = now_col()  # last write of the content (a re-learned fact bumps it)
     search: Mapped[Any] = mapped_column(
         TSVECTOR,
         Computed("setweight(to_tsvector('english', coalesce(key, '')), 'A') || "
@@ -334,7 +346,8 @@ class UsageEvent(Base):
     """LLM usage of one run (one row per recording), for per-org and per-user accounting and quotas."""
 
     __tablename__ = "usage_events"
-    __table_args__ = (Index("ix_usage_events_org_id_ts", "org_id", "ts"),)
+    __table_args__ = (Index("ix_usage_events_org_id_ts", "org_id", "ts"),
+                      Index("ix_usage_events_org_id_ts_user_id", "org_id", "ts", "user_id"))  # budget check, reports
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
@@ -364,7 +377,7 @@ class ModelHealth(Base):
 
     key_hash: Mapped[str] = mapped_column(String(128), primary_key=True)
     model: Mapped[str] = mapped_column(String(128), primary_key=True)
-    status: Mapped[str] = mapped_column(String(24))  # ok | quota | unavailable | unknown
+    status: Mapped[str] = mapped_column(String(24))  # quota | missing | unavailable (rows past ``until`` are ignored)
     until: Mapped[datetime | None] = ts_col()
     reason: Mapped[str] = mapped_column(Text, server_default="")
 

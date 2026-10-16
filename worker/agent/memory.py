@@ -13,7 +13,8 @@ def render_facts(facts: dict[str, Fact]) -> str:
     lines = []
     for fact in facts.values():
         origin = ", ".join(part for part in (fact.source, f"step {fact.step}" if fact.step else "") if part)
-        lines.append(f"- {fact.key}: {truncate(fact.value, MAX_VALUE_CHARS)}" + (f"  [{origin}]" if origin else ""))
+        mark = "  (durable)" if fact.durable else ""
+        lines.append(f"- {fact.key}: {truncate(fact.value, MAX_VALUE_CHARS)}" + (f"  [{origin}]" if origin else "") + mark)
     return "\n".join(lines)
 
 
@@ -24,9 +25,11 @@ class WorkingMemory:
         self.facts: dict[str, Fact] = facts if facts is not None else {}
         self.step = 0
 
-    def remember(self, key: str, value: str, source: str = "", step: int | None = None) -> Fact:
-        """Store (or overwrite) a fact."""
-        fact = Fact(key=key.strip(), value=str(value), source=source, step=self.step if step is None else step)
+    def remember(self, key: str, value: str, source: str = "", step: int | None = None, *, durable: bool = False,
+                 scope: str = "") -> Fact:
+        """Store (or overwrite) a fact. ``durable`` / ``scope``: see ``Fact``."""
+        fact = Fact(key=key.strip(), value=str(value), source=source, step=self.step if step is None else step,
+                    durable=bool(durable), scope=scope.strip())
         self.facts[fact.key] = fact
         return fact
 

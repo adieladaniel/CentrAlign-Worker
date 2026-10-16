@@ -6,6 +6,9 @@
   ``•••• (credential erp.password)``.
 * ``http_request(auth_credential=...)`` (see ``http.py``) attaches the credential's header the same way.
 
+The read-only verifier may use ``browser_fill_secret`` to sign in, and only into the fields of a sign-in form (see
+``_is_login_form_field`` in ``browser.py``); it cannot change anything.
+
 The run's credentials are the ``VaultScope`` in ``ctx.extras["vault_scope"]`` (set by ``AgentRunner``). Tools that handle a
 value also apply the run's ``Redactor`` (``ctx.extras["redactor"]``) to what they return, in case the page echoes it.
 """
@@ -14,7 +17,7 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 from worker.tools.base import Tool, ToolContext, ToolResult
-from worker.tools.browser import ACTION_TIMEOUT_MS, BrowserTool, BrowserToolError, _ref_schema
+from worker.tools.browser import ACTION_TIMEOUT_MS, BrowserTool, BrowserToolError, _is_login_form_field, _ref_schema
 from worker.tools.registry import ToolRegistry
 
 # <input type=...> values a credential may be typed into. Textareas are refused on purpose: a free-text box (a comment,
@@ -77,7 +80,8 @@ class FillSecretTool(BrowserTool):
         },
         "required": ["ref", "credential", "field"],
     }
-    read_only_safe = False  # the verifier cannot type
+    read_only_safe = False  # stays gated under confirm_all for the worker ...
+    verifier_allowed = True  # ... but the read-only verifier may use it to sign in (see ``refusal``)
     max_retries = 1
 
     # Filling is not committing, so the risk stays READ (the submit click is classified and gated as usual).
@@ -87,7 +91,12 @@ class FillSecretTool(BrowserTool):
                 f"{self._element_desc(args, ctx)} on {self._page_path(ctx)}")
 
     def refusal(self, args, session):
-        return "Filling credentials is not allowed in read-only mode."
+        """Read-only mode (the verifier) may authenticate but not change anything: only into a text/password input of
+        a login form (every submit control of the form is a READ one, e.g. "Sign in")."""
+        if _is_login_form_field(session, args.get("ref")):
+            return None
+        return ("Filling credentials is only allowed in read-only mode into the fields of a sign-in form "
+                "(a form whose button is Sign in / Log in).")
 
     async def run(self, args: dict, ctx: ToolContext) -> ToolResult:
         result = await super().run(args, ctx)  # session handling, read-only refusal and error mapping

@@ -134,6 +134,13 @@ class QuotaExhaustedError(LLMError):
         self.retry_after = retry_after
 
 
+class QuotaExceededError(LLMError):
+    """The organization's own daily LLM budget (tokens or calls, see ``worker/usage.py``) is used up.
+
+    Unlike ``QuotaExhaustedError`` (a provider quota for one model) this is a policy decision of the deployment: no
+    model or key switch helps, so the run ends as needs_attention with this message until the budget resets."""
+
+
 class ModelUnavailableError(LLMError):
     """``model`` cannot serve requests: unknown (404, ``temporary=False``) or persistently overloaded (503)."""
 

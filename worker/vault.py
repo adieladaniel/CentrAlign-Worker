@@ -40,6 +40,10 @@ DEFAULT_OWNER = "default"
 # Internal credentials: stored like any other, but never offered to the agent or listed in the credentials UI. Their
 # values are still redacted. ``sim_entry`` holds the org's simulated-company entry token (see worker/provisioning.py).
 HIDDEN_CREDENTIALS = frozenset({"sim_entry"})
+# An org's own Gemini API key (kind ``api_key``, field ``api_key``): the platform uses it for the org's LLM calls
+# (worker/llm/factory.py). Admins manage it like any credential, but the agent never sees or can use it.
+LLM_KEY_CREDENTIAL = "gemini"
+AGENT_HIDDEN_CREDENTIALS = HIDDEN_CREDENTIALS | {LLM_KEY_CREDENTIAL}
 KINDS = ("login", "api_key", "header")
 # Fields that identify rather than authenticate: they are listed and may be shown, everything else is secret.
 NON_SECRET_FIELDS = frozenset({"username", "user", "login", "email", "header_name"})
@@ -112,6 +116,12 @@ class Credential:
 def is_hidden(name: str) -> bool:
     """Is ``name`` an internal credential that the agent and the credentials UI must not see?"""
     return name in HIDDEN_CREDENTIALS
+
+
+def is_agent_hidden(name: str) -> bool:
+    """Is ``name`` a credential the agent must not see or use (internal ones and the org's LLM key)? Admins still manage
+    the LLM key; its value is redacted like every other secret in scope."""
+    return name in AGENT_HIDDEN_CREDENTIALS
 
 
 def _host_of(url: str) -> str:
@@ -376,7 +386,7 @@ class VaultScope:
 
     Lives in ``ctx.extras["vault_scope"]``. ``public()`` / ``names()`` / ``get()`` / ``credentials()`` cover the
     credentials the agent may use and are safe to show (``get()`` returns values and is for tools and the redactor only).
-    Internal credentials (``HIDDEN_CREDENTIALS``) are invisible to all of those and reachable only through
+    Internal credentials (``AGENT_HIDDEN_CREDENTIALS``: the entry token, the org's LLM key) are invisible to all of those and reachable only through
     ``internal()``; their values are still part of ``secret_values()`` so they are redacted like everything else."""
 
     def __init__(self, owner: str = DEFAULT_OWNER, credentials: Iterable[Credential] = ()):
@@ -388,10 +398,10 @@ class VaultScope:
         return cls(owner, await vault.credentials(owner))
 
     def _visible(self) -> list[Credential]:
-        return [c for c in self._credentials.values() if not is_hidden(c.name)]
+        return [c for c in self._credentials.values() if not is_agent_hidden(c.name)]
 
     def get(self, name: str) -> Credential | None:
-        return None if is_hidden(str(name)) else self._credentials.get(str(name))
+        return None if is_agent_hidden(str(name)) else self._credentials.get(str(name))
 
     def internal(self, name: str) -> Credential | None:
         """An internal credential (or any other) by name, for server code only: never expose the result to the agent."""

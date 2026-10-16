@@ -25,6 +25,8 @@ from playwright.async_api import Browser, BrowserContext
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
+from worker import metrics
+
 log = logging.getLogger(__name__)
 
 HEADED_SLOW_MO_MS = 150
@@ -61,6 +63,7 @@ class BrowserPool:
         self._pw: Any = None
         self._browsers: dict[bool, Browser] = {}  # keyed by headless
         self._open: set[BrowserContext] = set()  # contexts that currently hold a slot
+        self._crashed: set[bool] = set()  # modes whose Chromium died; the next launch of that mode is a relaunch
 
     # ---- introspection
     @property
@@ -97,6 +100,7 @@ class BrowserPool:
             self._slots.release()
             raise
         self._open.add(context)
+        metrics.BROWSER_CONTEXTS.inc()
         return context
 
     async def release(self, context: BrowserContext | None) -> None:
@@ -109,6 +113,7 @@ class BrowserPool:
             pass
         if context in self._open:
             self._open.discard(context)
+            metrics.BROWSER_CONTEXTS.dec()
             self._slots.release()
 
     async def shutdown(self) -> None:
@@ -126,6 +131,7 @@ class BrowserPool:
                     await pw.stop()
                 except Exception:  # noqa: BLE001
                     pass
+            metrics.BROWSER_CONTEXTS.dec(len(self._open))
             self._open.clear()
             self._slots = asyncio.Semaphore(self.max_contexts)
 
@@ -157,6 +163,9 @@ class BrowserPool:
             await self._stop_driver()
             raise
         self.launches += 1
+        if headless in self._crashed:
+            self._crashed.discard(headless)
+            metrics.BROWSER_RELAUNCHES.inc()
         browser.on("disconnected", lambda b, h=headless: self._on_disconnected(h, b))
         self._browsers[headless] = browser
         return browser
@@ -172,6 +181,7 @@ class BrowserPool:
     def _on_disconnected(self, headless: bool, browser: Browser) -> None:
         if self._browsers.get(headless) is browser:
             del self._browsers[headless]
+            self._crashed.add(headless)
 
 
 _POOLS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, BrowserPool] = weakref.WeakKeyDictionary()

@@ -15,8 +15,8 @@ import pytest
 import pytest_asyncio
 import uvicorn
 from dbapp import (
-    ENTRY_TOKENS, ERP_PASSWORDS, call, finished, new_client, pending_request, reply, seed_world, session_cookie, sign_in,
-    start_run, write_script, ws_connect,
+    ENTRY_TOKENS, ERP_PASSWORDS, call, finished, new_client, pending_request, reply, runner_of, seed_world, session_cookie,
+    shutdown_all, sign_in, start_run, write_script, ws_connect,
 )
 from sqlalchemy import select, text
 
@@ -104,7 +104,7 @@ async def test_websocket_needs_a_session_and_the_run_must_belong_to_the_callers_
     assert not forged.accepted and forged.close_code == 1008
 
     own = await ws_connect(app, path, session_cookie(globex_op))
-    assert own.accepted and own.types[0] == "run_started" and own.types[-1] == "replay_done" and "run_finished" in own.types
+    assert own.accepted and own.types[0] == "run_queued" and own.types[-1] == "replay_done" and "run_finished" in own.types
     assert "Globex only" in own.messages[0]["payload"]["task"]
 
     acme = await sign_in(app, "admin@acme.test")
@@ -133,7 +133,7 @@ async def test_a_foreign_websocket_does_not_subscribe_to_a_live_run(world, db_ap
     run_id = await start_run(globex_op)
     await pending_request(globex_op, run_id)
     foreign = await ws_connect(app, f"/api/runs/{run_id}/events", session_cookie(await sign_in(app, "viewer@acme.test")))
-    assert foreign.types == ["error"] and app.state.sessions[run_id].subscribers == set()
+    assert foreign.types == ["error"] and app.state.hub._feeds == {}  # nothing was subscribed on the foreign caller's behalf
     own = await ws_connect(app, f"/api/runs/{run_id}/events", session_cookie(globex_op), timeout=1.0)
     assert "approval_requested" in own.types and own.messages[-1]["payload"] == {"live": True}  # the live run is followable
     await globex_op.post(f"/api/runs/{run_id}/cancel")
@@ -152,7 +152,7 @@ async def test_runs_get_only_their_own_orgs_credentials_and_never_see_the_entry_
         await finished(client, runs[slug])
 
     for slug, other in (("acme", "globex"), ("globex", "acme")):
-        runner = app.state.sessions[runs[slug]].runner
+        runner = runner_of(app, runs[slug])
         scope = runner.vault_scope
         assert scope.owner == str(world.org_ids[slug]) and scope.names() == ["erp"]
         assert scope.get("erp").fields["password"] == ERP_PASSWORDS[slug]
@@ -165,7 +165,7 @@ async def test_runs_get_only_their_own_orgs_credentials_and_never_see_the_entry_
         assert runner.redactor.redact(ENTRY_TOKENS[other]) == ENTRY_TOKENS[other]
         assert runner.redactor.redact(ERP_PASSWORDS[slug]) == "[REDACTED:erp.password]"
 
-    llms = {run.runner.state.run_id: llm for run, llm in zip(app.state.sessions.values(), planner.created)}
+    llms = dict(zip(app.state.test_worker.claimed, planner.created))  # the worker creates each run's LLM when it claims it
     for slug, other in (("acme", "globex"), ("globex", "acme")):
         prompt = "\n".join(m.content for m in llms[runs[slug]].calls[0]["messages"])
         assert "erp" in prompt and "secure vault" in prompt  # the agent is told which credential names exist
@@ -173,9 +173,9 @@ async def test_runs_get_only_their_own_orgs_credentials_and_never_see_the_entry_
             assert secret not in prompt, secret
         assert "Company intranet start page: http://127.0.0.1:9" in prompt and "/t/" not in prompt  # no token link either
 
-    cookie = app.state.sessions[runs["acme"]].runner.ctx.extras["browser_init_cookies"]
+    cookie = runner_of(app, runs["acme"]).ctx.extras["browser_init_cookies"]
     assert cookie == [{"name": "sim_tenant", "value": ENTRY_TOKENS["acme"], "url": "http://127.0.0.1:9/", "httpOnly": True, "sameSite": "Lax"}]
-    assert app.state.sessions[runs["globex"]].runner.ctx.extras["browser_init_cookies"][0]["value"] == ENTRY_TOKENS["globex"]
+    assert runner_of(app, runs["globex"]).ctx.extras["browser_init_cookies"][0]["value"] == ENTRY_TOKENS["globex"]
 
     async with world.sm() as session:  # nothing about the token was written to the run's events or steps
         dump = repr((await session.execute(text("select payload from run_events"))).all()) + repr(
@@ -211,7 +211,8 @@ async def sim_client(sim_app):
 @pytest_asyncio.fixture(loop_scope="session")
 async def bare_world(pg_sessionmaker):
     """The seeded orgs, but without any simulated company yet."""
-    return await seed_world(pg_sessionmaker, environments=False)
+    yield await seed_world(pg_sessionmaker, environments=False)
+    await shutdown_all()
 
 
 def provisioned_app(bare_world, sim_client, tmp_path, **settings):
@@ -285,11 +286,11 @@ async def test_provisioning_creates_the_orgs_tenant_and_stores_its_logins_encryp
 
     # the org can now run, and its run is pinned to its own tenant
     run_id = await start_run(acme_op)
-    runner = app.state.sessions[run_id].runner
+    await finished(acme_op, run_id)
+    runner = runner_of(app, run_id)
     assert runner.ctx.extras["browser_init_cookies"] == [{"name": "sim_tenant", "value": tenant.token, "url": "http://sim.test/",
                                                          "httpOnly": True, "sameSite": "Lax"}]
     assert sorted(runner.vault_scope.names()) == ["erp", "erp_api", "mail", "portal"]
-    await finished(acme_op, run_id)
 
 
 async def audit_rows(sm):

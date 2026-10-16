@@ -145,6 +145,14 @@ class _Site(BaseHTTPRequestHandler):
                 "<input type='checkbox' id='c' name='remember' aria-label='Remember me'>"
                 "<button type='submit'>Sign in</button></form></main></body></html>"
             )
+        elif url.path == "/register":  # looks like a login (username + password) but its button creates an account
+            self._send(
+                "<html><head><title>Register</title></head><body><main><h1>Create account</h1>"
+                "<form method='post' action='/echo'>"
+                "<label for='u'>Username</label><input id='u' name='username' type='text'>"
+                "<label for='p'>Password</label><input id='p' name='password' type='password'>"
+                "<button type='submit'>Sign up</button></form></main></body></html>"
+            )
         elif url.path == "/prefilled":  # a text field that already holds a value from the query string
             value = html.escape(parse_qs(url.query).get("v", [""])[0], quote=True)
             self._send(
@@ -338,9 +346,13 @@ async def test_list_credentials_shows_names_and_hints_only(vault, tmp_path):
     assert none.ok and "No credentials" in none.observation
 
 
-def test_verifier_gets_list_credentials_but_not_fill_secret():
-    safe = set(build_registry(Settings(_env_file=None)).subset(read_only=True).names())
-    assert "list_credentials" in safe and "browser_fill_secret" not in safe
+def test_verifier_gets_list_credentials_and_fill_secret_but_cannot_type():
+    registry = build_registry(Settings(_env_file=None))
+    safe = set(registry.subset(read_only=True).names())
+    assert {"list_credentials", "browser_fill_secret"} <= safe
+    assert "browser_type" not in safe and "browser_select" not in safe and "browser_press" not in safe
+    # offered to the auditor without being "read-only safe": the approval policy still gates it under confirm_all
+    assert registry.get("browser_fill_secret").verifier_allowed and not registry.get("browser_fill_secret").read_only_safe
 
 
 # ---------------------------------------------------------------- browser_fill_secret
@@ -398,10 +410,53 @@ async def test_fill_secret_refusals(vault, tmp_path, browser_pool, site):
         assert not mismatch.ok and "only for erp.example.com" in mismatch.observation
         assert await session.page.input_value("#u") == ""
 
-        ctx.extras["read_only"] = True  # the auditor may not type
-        readonly = await execute_with_retry(fill, {"ref": user_ref, "credential": "erp", "field": "username"}, ctx)
-        assert not readonly.ok and readonly.error == "read_only_refused"
-        assert await session.page.input_value("#u") == ""
+        # read-only mode (the auditor) may only sign in: the notes textarea and the checkbox of this login page are refused
+        ctx.extras["read_only"] = True
+        for ref in (notes_ref, box_ref):
+            readonly = await execute_with_retry(fill, {"ref": ref, "credential": "erp", "field": "password"}, ctx)
+            assert not readonly.ok and readonly.error == "read_only_refused"
+        assert await session.page.input_value("#n") == ""
+    finally:
+        await close_browser(ctx)
+
+
+async def test_fill_secret_in_read_only_mode_only_signs_in(vault, tmp_path, browser_pool, site):
+    scope = await make_scope(vault)
+    ctx = make_ctx(tmp_path, browser_pool, scope)
+    registry = build_registry(ctx.settings)
+    fill, navigate, click = (registry.get(n) for n in ("browser_fill_secret", "browser_navigate", "browser_click"))
+    args = lambda ref, field: {"ref": ref, "credential": "erp", "field": field}  # noqa: E731
+    try:
+        ctx.extras["read_only"] = True
+        # pages that are not a sign-in form: a settings form ("Save settings") and an account-creation form ("Sign up")
+        page = await execute_with_retry(navigate, {"url": f"{site}/prefilled"}, ctx)
+        refused = await execute_with_retry(fill, args(ref_of(page.observation, '"API token"'), "password"), ctx)
+        assert not refused.ok and refused.error == "read_only_refused" and "sign-in form" in refused.observation
+        assert await ctx.extras["browser"].page.input_value("input[name=token]") == ""
+        page = await execute_with_retry(navigate, {"url": f"{site}/register"}, ctx)
+        for label, field in (('"Username"', "username"), ('"Password"', "password")):
+            refused = await execute_with_retry(fill, args(ref_of(page.observation, label), field), ctx)
+            assert not refused.ok and refused.error == "read_only_refused"
+        assert [await ctx.extras["browser"].page.input_value(sel) for sel in ("#u", "#p")] == ["", ""]
+
+        # the real sign-in form: both fields can be filled and the Sign in click (READ) goes through
+        page = await execute_with_retry(navigate, {"url": f"{site}/login"}, ctx)
+        user = await execute_with_retry(fill, args(ref_of(page.observation, '"Username"'), "username"), ctx)
+        password = await execute_with_retry(fill, args(ref_of(page.observation, '"Password"'), "password"), ctx)
+        assert user.ok and password.ok, password.observation
+        assert "•••• (credential erp.password)" in password.observation
+        session = ctx.extras["browser"]
+        assert await session.page.input_value("#p") == PASSWORD and await session.page.input_value("#u") == USERNAME
+        sign_in = ref_of(password.observation, 'button "Sign in"')
+        assert click.classify({"ref": sign_in}, ctx) is Risk.READ
+        welcome = await execute_with_retry(click, {"ref": sign_in}, ctx)
+        assert welcome.ok and f"Signed in as {USERNAME}" in welcome.observation
+        assert PASSWORD not in welcome.observation  # the page echoes the password: it is scrubbed
+
+        # but the account-creation click is still refused
+        page = await execute_with_retry(navigate, {"url": f"{site}/register"}, ctx)
+        refused = await execute_with_retry(click, {"ref": ref_of(page.observation, '"Sign up"')}, ctx)
+        assert not refused.ok and refused.error == "read_only_refused"
     finally:
         await close_browser(ctx)
 

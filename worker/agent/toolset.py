@@ -8,7 +8,7 @@ from worker.tools.control import FinishTool, UpdatePlanTool
 from worker.tools.files import ListFilesTool, ReadFileTool, WriteFileTool
 from worker.tools.http import HttpRequestTool
 from worker.tools.interaction import AskUserTool
-from worker.tools.memory_tools import RememberTool
+from worker.tools.memory_tools import RecallTool, RememberTool
 from worker.tools.registry import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ def build_registry(settings: Settings) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in (
         ListFilesTool(), ReadFileTool(), WriteFileTool(), HttpRequestTool(),
-        RememberTool(), UpdatePlanTool(), FinishTool(), AskUserTool(),
+        RememberTool(), RecallTool(), UpdatePlanTool(), FinishTool(), AskUserTool(),
     ):
         registry.register(tool)
     try:

@@ -287,7 +287,10 @@
     if (form) {
       rec.inForm = true;
       if (isSubmitControl(el)) rec.submit = true;
-      else if (tag === 'input' || tag === 'select' || tag === 'textarea') rec.formSubmits = submitNamesOf(form);
+      else if (tag === 'input' || tag === 'select' || tag === 'textarea') {
+        rec.formSubmits = submitNamesOf(form);
+        if (form.querySelector('input[type=password]')) rec.formHasPassword = true;
+      }
     }
     elements.push(rec);
   }

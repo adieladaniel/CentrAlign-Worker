@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from worker.config import Settings
 from worker.db.models import DEFAULT_ORG_SETTINGS, Membership, Org, User
 from worker.db.seed import hash_password
+from worker.jobs import Worker
 from worker.llm.base import LLMResponse, ToolCall, Usage
 from worker.llm.fake import ScriptedLLM
 from worker.server import create_app
@@ -176,26 +177,162 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
     return Settings(**values)
 
 
+APPS: list = []  # every app and worker a test built, so ``shutdown_all`` can stop what it started
+WORKERS: list[Worker] = []
+
+
 def make_app(world: World, tmp_path: Path, planner: Planner | None = None, **settings_overrides: Any):
-    """The server in database mode over the test database; returns ``(app, planner)``."""
+    """The server in database mode over the test database; returns ``(app, planner)``. The app only queues runs: a
+    worker that executes them is started by ``ensure_worker`` (``sign_in`` and ``start_run`` do it)."""
     planner = planner or Planner()
-    app = create_app(make_settings(tmp_path, **settings_overrides), llm_factory=planner, registry_factory=small_registry,
+    registry_factory = settings_overrides.pop("registry_factory", small_registry)
+    app = create_app(make_settings(tmp_path, **settings_overrides), llm_factory=planner, registry_factory=registry_factory,
                      vault=world.vault, sessionmaker=world.sm)
+    APPS.append(app)
     return app, planner
+
+
+async def ensure_worker(app, **options: Any) -> Worker:
+    """The in-process worker of ``app`` (started on first use): the app's own LLM and tool factories, its vault, and a
+    concurrency high enough that tests are not held back by it. A test that needs more workers builds them itself."""
+    worker = getattr(app.state, "test_worker", None)
+    if worker is None:
+        options.setdefault("concurrency", 4)
+        worker = Worker(app.state.settings, app.state.sessionmaker, worker_id=f"test-worker-{len(WORKERS) + 1}",
+                        llm_factory=app.state.llm_factory, registry_factory=app.state.registry_factory,
+                        vault=app.state.org_vault(), shutdown_browser=False, **options)
+        await worker.start()
+        app.state.test_worker = worker
+        WORKERS.append(worker)
+    return worker
+
+
+async def shutdown_all() -> None:
+    """Stop every worker and live-event hub the test started (a leftover worker would claim the next test's runs)."""
+    workers, apps = list(WORKERS), list(APPS)
+    WORKERS.clear()
+    APPS.clear()
+    for worker in workers:
+        await worker.stop()
+    for app in apps:
+        if app.state.hub is not None:
+            await app.state.hub.stop()
+
+
+def new_worker(app, worker_id: str, **options: Any) -> Worker:
+    """An extra, not yet started worker on the same database as ``app`` (stopped by ``shutdown_all``)."""
+    options.setdefault("concurrency", 4)
+    worker = Worker(app.state.settings, app.state.sessionmaker, worker_id=worker_id, llm_factory=app.state.llm_factory,
+                    registry_factory=app.state.registry_factory, vault=app.state.org_vault(), shutdown_browser=False, **options)
+    WORKERS.append(worker)
+    return worker
+
+
+async def kill_worker(worker: Worker) -> None:
+    """Simulate the worker process dying: nothing is written to the database any more, no lease is released, nothing is
+    handed back. (``Worker.stop`` is the polite way.)"""
+    worker._stopping = True
+    for handle in list(worker.handles.values()):
+        handle.lost = True
+        handle.store.fenced = True
+        if handle.broker is not None:
+            handle.broker.keep_pending = True
+        for task in (handle.beat, handle.task):
+            if task is not None:
+                task.cancel()
+    tasks = [t for h in worker.handles.values() for t in (h.beat, h.task) if t is not None] + worker._tasks
+    for task in worker._tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    if worker.listener is not None:
+        await worker.listener.stop()
+    worker.handles.clear()
+
+
+async def run_row(sm: async_sessionmaker[AsyncSession], run_id: str) -> dict:
+    """The queue bookkeeping of a run, straight from the table."""
+    from sqlalchemy import text
+
+    async with sm() as session:
+        row = (await session.execute(text(
+            "select status, lease_owner, attempts, resume_requested, cancel_requested, resume_count, finished_at "
+            "from runs where id = :id"), {"id": uuid.UUID(run_id)})).one()
+    return dict(row._mapping)
+
+
+async def event_types(sm: async_sessionmaker[AsyncSession], run_id: str) -> list[str]:
+    from sqlalchemy import text
+
+    async with sm() as session:
+        return list((await session.execute(text("select type from run_events where run_id = :id order by seq"),
+                                           {"id": uuid.UUID(run_id)})).scalars().all())
+
+
+class Gates:
+    """Named asyncio events that fake tools wait on, so a test decides when a run may continue."""
+
+    def __init__(self) -> None:
+        self.events: dict[str, asyncio.Event] = {}
+        self.entered: dict[str, list[str]] = {}  # gate -> run ids that reached it
+
+    def gate(self, name: str) -> asyncio.Event:
+        return self.events.setdefault(name, asyncio.Event())
+
+    async def reached(self, name: str, count: int = 1, timeout: float = 10.0) -> bool:
+        return await wait_until(lambda: len(self.entered.get(name, [])) >= count, timeout)
+
+
+class HoldTool(Tool):
+    """Waits at a named gate until the test opens it."""
+
+    name = "hold"
+    description = "Wait for a signal."
+    parameters = {"type": "object", "properties": {"gate": {"type": "string"}}, "required": ["gate"]}
+
+    def __init__(self, gates: Gates) -> None:
+        self.gates = gates
+
+    async def run(self, args: dict, ctx: ToolContext) -> ToolResult:
+        name = args["gate"]
+        self.gates.entered.setdefault(name, []).append(ctx.run_id)
+        await self.gates.gate(name).wait()
+        return ToolResult(ok=True, observation=f"Gate {name} opened.")
+
+
+def registry_with(gates: Gates, *extra: Tool):
+    """A ``registry_factory`` with the small tool set plus ``hold`` (and anything in ``extra``)."""
+
+    def factory(settings: Settings) -> ToolRegistry:
+        registry = small_registry(settings)
+        for tool in (HoldTool(gates), *extra):
+            registry.register(tool)
+        return registry
+
+    return factory
+
+
+def runner_of(app, run_id: str):
+    """The ``AgentRunner`` that the app's test worker used for a run."""
+    return app.state.test_worker.recent[run_id].runner
 
 
 # --------------------------------------------------------------------------- HTTP and WebSocket drivers
 
 
 def new_client(app, ip: str = "203.0.113.7") -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=(ip, 51000)), base_url="http://test")
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=(ip, 51000)), base_url="http://test")
+    client.app_under_test = app  # type: ignore[attr-defined]
+    return client
 
 
-async def sign_in(app, email: str, password: str = PASSWORD, ip: str = "203.0.113.7") -> httpx.AsyncClient:
-    """A client holding a valid session cookie of ``email``."""
+async def sign_in(app, email: str, password: str = PASSWORD, ip: str = "203.0.113.7", worker: bool = True) -> httpx.AsyncClient:
+    """A client holding a valid session cookie of ``email``. Also starts the app's in-process worker (``ensure_worker``)
+    unless ``worker=False``: a test that manages its own workers signs in without one."""
     client = new_client(app, ip)
     resp = await client.post("/api/auth/login", json={"email": email, "password": password})
     assert resp.status_code == 200, resp.text
+    if worker:
+        await ensure_worker(app)
     return client
 
 

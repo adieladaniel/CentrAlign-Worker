@@ -53,6 +53,9 @@ class Tool(ABC):
     parameters: ClassVar[dict]  # JSON Schema, type=object
     risk: ClassVar[Risk] = Risk.READ
     read_only_safe: ClassVar[bool] = True  # may be given to the verifier
+    # Offered to the verifier although not read_only_safe: the tool enforces its own narrow read-only rule
+    # (``BrowserTool.refusal``). Kept separate so the approval policy still treats the tool as not read-only-safe.
+    verifier_allowed: ClassVar[bool] = False
     max_retries: ClassVar[int] = 2  # auto-retries for transient failures
 
     def classify(self, args: dict, ctx: ToolContext) -> Risk:

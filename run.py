@@ -1,6 +1,9 @@
 """Start the simulated company (port 8001) and the worker server + dashboard (port 8000) together.
 
-Usage: ``python run.py [--open]``. Ctrl+C stops both cleanly.
+Usage: ``python run.py [--open] [--workers N]``. Ctrl+C stops everything cleanly.
+
+In database mode (``DATABASE_URL`` set) the API process only queues runs, so this also starts N worker processes
+(``python -m worker.jobs``, default 1) that claim and execute them.
 """
 from __future__ import annotations
 
@@ -33,11 +36,19 @@ def port_free(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) != 0
 
 
-def spawn(name: str, module: str) -> subprocess.Popen:
+def spawn(name: str, module: str, *args: str) -> subprocess.Popen:
     """Start ``python -m module`` in its own process group so Ctrl+C can be forwarded deliberately."""
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
-    print(f"[run] starting {name}: python -m {module}")
-    return subprocess.Popen([sys.executable, "-m", module], cwd=ROOT, creationflags=flags)
+    print(f"[run] starting {name}: python -m {module} {' '.join(args)}".rstrip())
+    return subprocess.Popen([sys.executable, "-m", module, *args], cwd=ROOT, creationflags=flags)
+
+
+def database_mode() -> bool:
+    """Will the API run in database mode (users and a job queue in PostgreSQL)?"""
+    sys.path.insert(0, str(ROOT))
+    from worker.config import get_settings
+
+    return get_settings().db_auth
 
 
 def wait_healthy(url: str, name: str, proc: subprocess.Popen, timeout: float = 45.0) -> None:
@@ -82,6 +93,8 @@ def stop(proc: subprocess.Popen, name: str, grace: float = 8.0) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the simulated company and the CentrAlign Worker dashboard.")
     parser.add_argument("--open", action="store_true", help="Open the dashboard in the default browser.")
+    parser.add_argument("--workers", type=int, default=1, metavar="N",
+                        help="Worker processes that execute queued runs (database mode only; default 1).")
     args = parser.parse_args()
 
     def _interrupt(signum, frame):  # Ctrl+Break / SIGTERM take the same clean-shutdown path as Ctrl+C
@@ -106,7 +119,12 @@ def main() -> int:
         worker = spawn("worker server", "worker.server")
         procs.append(("worker", worker))
         wait_healthy(f"{WORKER_URL}/api/health", "worker server", worker)
-        print(f"\n[run] CentrAlign Worker dashboard: {WORKER_URL}\n[run] press Ctrl+C to stop both servers\n")
+        if database_mode():
+            for number in range(1, max(args.workers, 0) + 1):
+                name = f"job worker {number}"
+                procs.append((name, spawn(name, "worker.jobs", "--worker-id", f"local-{number}")))
+            print(f"[run] {max(args.workers, 0)} job worker(s) started: the API only queues runs, the workers execute them")
+        print(f"\n[run] CentrAlign Worker dashboard: {WORKER_URL}\n[run] press Ctrl+C to stop everything\n")
         if args.open:
             webbrowser.open(WORKER_URL)
 

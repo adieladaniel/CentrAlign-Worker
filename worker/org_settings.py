@@ -9,6 +9,7 @@ Approval rights are a capability of their own, not just a rank. ``can_approve`` 
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from worker.config import Settings
@@ -21,10 +22,25 @@ _BOOLEANS = ("separation_of_duties", "sod_for_writes", "operators_can_approve")
 _NUMBERS: dict[str, tuple[int, int]] = {
     "approval_timeout_s": (30, 7 * 24 * 3600),
     "max_runs_per_day": (0, 100_000),    # 0 = unlimited
+    "max_concurrent_runs": (1, 50),      # runs of the org executing at once (enforced when a worker claims a run)
     "max_steps": (1, 500),
     "run_timeout_s": (30, 24 * 3600),
 }
-EDITABLE = ("approval_mode", *_BOOLEANS, *_NUMBERS)
+
+# LLM budget and model chain (worker/usage.py enforces the budget before every call). 0 = unlimited.
+_NUMBERS.update({
+    "max_tokens_per_day": (0, 10_000_000_000),   # input + output tokens per UTC day
+    "max_llm_calls_per_day": (0, 10_000_000),
+})
+# Long-term organization memory (worker/memory_store.py).
+_NUMBERS.update({
+    "memory_recall_limit": (0, 20),     # memories recalled per run and per recall call; 0 turns organization memory off
+    "memory_ttl_days": (0, 3650),       # a memory unused for this long expires; 0 = never
+})
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$")
+MAX_GEMINI_MODELS = 12
+_LISTS = ("gemini_models",)   # optional override of the Gemini fallback chain; empty = the deployment's chain
+EDITABLE = ("approval_mode", *_BOOLEANS, *_NUMBERS, *_LISTS)
 
 # What a missing key means. max_steps / run_timeout_s / approval_mode default to the deployment's settings instead.
 ORG_SETTING_DEFAULTS: dict[str, Any] = {
@@ -33,6 +49,12 @@ ORG_SETTING_DEFAULTS: dict[str, Any] = {
     "operators_can_approve": False,
     "approval_timeout_s": 3600,
     "max_runs_per_day": 50,
+    "max_concurrent_runs": 2,
+    "max_tokens_per_day": 2_000_000,
+    "max_llm_calls_per_day": 500,
+    "gemini_models": [],
+    "memory_recall_limit": 5,
+    "memory_ttl_days": 180,
 }
 
 # Roles that always hold approval rights; operators only when the org allows it.
@@ -47,6 +69,37 @@ def effective(stored: dict | None, deployment: Settings) -> dict[str, Any]:
         "run_timeout_s": deployment.RUN_TIMEOUT_S, **ORG_SETTING_DEFAULTS,
     }
     return {key: stored[key] if key in stored and stored[key] is not None else base[key] for key in EDITABLE}
+
+
+def _clean_models(value: Any) -> list[str]:
+    """The ``gemini_models`` list, trimmed and de-duplicated; raises ``ValueError`` for anything but a list of model names."""
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError("gemini_models must be a list of model names (empty = use the default chain).")
+    names = list(dict.fromkeys(v.strip() for v in value if v.strip()))
+    if len(names) > MAX_GEMINI_MODELS:
+        raise ValueError(f"gemini_models can list at most {MAX_GEMINI_MODELS} models.")
+    bad = [n for n in names if not _MODEL_NAME_RE.match(n)]
+    if bad:
+        raise ValueError(f"Not a valid model name: {bad[0]!r} (letters, digits and . _ : / - only).")
+    return names
+
+
+def llm_budget(stored: dict | None) -> dict[str, int]:
+    """The org's daily LLM budget: ``{"max_tokens_per_day", "max_llm_calls_per_day"}`` (0 = unlimited)."""
+    stored = stored or {}
+    return {key: stored[key] if isinstance(stored.get(key), int) and not isinstance(stored.get(key), bool)
+            else ORG_SETTING_DEFAULTS[key] for key in ("max_tokens_per_day", "max_llm_calls_per_day")}
+
+
+def model_chain(stored: dict | None, deployment: Settings) -> list[str]:
+    """The Gemini model chain of an org: its ``gemini_models`` override when valid and non-empty, else the deployment's."""
+    models = (stored or {}).get("gemini_models")
+    if isinstance(models, list) and models:
+        try:
+            return _clean_models(models)
+        except ValueError:
+            pass
+    return deployment.gemini_models
 
 
 def validate_update(updates: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
@@ -66,6 +119,8 @@ def validate_update(updates: dict[str, Any], current: dict[str, Any]) -> dict[st
         elif key in _BOOLEANS:
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be true or false.")
+        elif key in _LISTS:
+            value = _clean_models(value)
         else:
             low, high = _NUMBERS[key]
             if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
@@ -94,6 +149,23 @@ def approval_block(settings: dict[str, Any], risk: str, user_id: str, run_starte
         return (f"Separation of duties: you started this run, so someone else must approve its {risk} actions "
                 "(you can still deny).")
     return None
+
+
+def answer_rights(role: str, user_id: str, settings: dict[str, Any], kind: str, risk: str,
+                  run_starter_id: str | None) -> tuple[bool, bool, str | None]:
+    """May this member answer an approval or question of a run, and may they *approve* it? ``(can_respond,
+    can_approve, reason)``; ``reason`` explains whichever is refused. Denying needs only the right to answer; the one
+    case with ``can_respond`` but not ``can_approve`` is separation of duties. The single place the API and the inbox
+    share (``respond`` enforces it, ``GET /api/approvals`` shows it)."""
+    if kind == "approval":
+        if not can_approve(role, settings):
+            hint = " An admin can allow operators to approve in the organization settings." if role == "operator" else ""
+            return False, False, f"Your role ({role}) cannot answer approvals.{hint}"
+        blocked = approval_block(settings, risk, user_id, run_starter_id)
+        return True, blocked is None, blocked
+    if role not in APPROVER_ROLES and role != "operator":  # questions: approver and above (an operator ranks higher)
+        return False, False, "Viewers cannot answer the agent's questions."
+    return True, True, None
 
 
 def stricter_mode(org_mode: str, requested: str | None) -> str:

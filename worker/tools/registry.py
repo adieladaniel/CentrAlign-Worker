@@ -32,10 +32,11 @@ class ToolRegistry:
         return [t.spec() for t in selected]
 
     def subset(self, read_only: bool = True) -> ToolRegistry:
-        """A new registry with only ``read_only_safe`` tools (or a full copy when ``read_only`` is False)."""
+        """A new registry with only ``read_only_safe`` (or ``verifier_allowed``) tools, or a full copy when ``read_only``
+        is False."""
         sub = ToolRegistry()
         for tool in self._tools.values():
-            if tool.read_only_safe or not read_only:
+            if tool.read_only_safe or tool.verifier_allowed or not read_only:
                 sub.register(tool)
         return sub
 

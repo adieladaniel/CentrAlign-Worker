@@ -73,8 +73,33 @@ def transcript_messages(turns: list[list[Step]]) -> list[Message]:
     return messages
 
 
-def state_block(state: RunState, nudges: list[str], feedback: str, budget: int) -> str:
-    """The "where you stand" block: goal, success criteria, plan, memory, guard nudges, verifier feedback."""
+KNOWLEDGE_HEADER = "Organization knowledge (from past verified runs; verify before relying on it):"
+KNOWLEDGE_CONTENT_LIMIT = 300
+
+
+def _age(days: int | None) -> str:
+    if days is None:
+        return ""
+    if days < 1:
+        return "today"
+    if days < 60:
+        return f"{days}d old"
+    return f"{days // 30}mo old"
+
+
+def render_knowledge(items: list[dict]) -> str:
+    """Recalled organization memories, one compact line each: ``- [scope] key: content (age)``."""
+    lines = []
+    for item in items:
+        scope = f"[{item['scope']}] " if item.get("scope") else ""
+        age = _age(item.get("age_days"))
+        lines.append(f"- {scope}{item['key']}: {_one_line(item['content'], KNOWLEDGE_CONTENT_LIMIT)}" + (f" ({age})" if age else ""))
+    return "\n".join(lines)
+
+
+def state_block(state: RunState, nudges: list[str], feedback: str, budget: int, knowledge: list[dict] | None = None) -> str:
+    """The "where you stand" block: goal, success criteria, plan, memory, organization knowledge, guard nudges, verifier
+    feedback. ``knowledge``: the organization memories recalled for this run (see ``worker/memory_store.py``)."""
     work = sum(1 for s in state.steps if s.kind == "tool")
     parts = [f"=== CURRENT STATE (action {work} of at most {budget}) ==="]
     if state.goal_summary:
@@ -85,6 +110,8 @@ def state_block(state: RunState, nudges: list[str], feedback: str, budget: int) 
         parts.append("Success criteria: not defined yet. Define them with update_plan.")
     parts.append("Plan:\n" + render_plan(state.plan))
     parts.append("Working memory:\n" + render_facts(state.facts))
+    if knowledge:
+        parts.append(f"{KNOWLEDGE_HEADER}\n{render_knowledge(knowledge)}")
     if feedback:
         parts.append("VERIFIER FEEDBACK (unresolved):\n" + feedback)
     for nudge in nudges:
@@ -135,15 +162,17 @@ def build_messages(
     feedback: str = "",
     window: int = WINDOW_STEPS,
     vault_credentials: list[dict] | None = None,
+    knowledge: list[dict] | None = None,
 ) -> list[Message]:
     """Assemble the full message list for the next LLM call. ``vault_credentials`` is the public description of the
-    run's vault credentials (``VaultScope.public()``); when empty the environment section is unchanged."""
+    run's vault credentials (``VaultScope.public()``); when empty the environment section is unchanged. ``knowledge``:
+    organization memories recalled for the run (shown in the state block; none = the section is absent)."""
     older, recent = _split_window(_turns(state.steps), window)
     messages = [
         Message(role="system", content=SYSTEM_PROMPT),
         Message(role="user", content=_first_user_message(state, settings, tool_names, older, vault_credentials)),
         *transcript_messages(recent),
     ]
-    block = state_block(state, nudges or [], feedback, settings.MAX_STEPS)
+    block = state_block(state, nudges or [], feedback, settings.MAX_STEPS, knowledge)
     messages[-1].content = f"{messages[-1].content}\n\n{block}"
     return messages

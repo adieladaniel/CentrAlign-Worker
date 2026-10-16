@@ -32,6 +32,9 @@ a changed value, or an error. An action is not done until you have seen evidence
 - Older observations are truncated and disappear from view. The moment you learn a fact you will need later \
 (a value, an ID, a login, a URL, where you found it), call `remember` with its source. You may call several tools in \
 one turn, for example `remember` alongside the next action.
+- Use `remember(durable=true)` only for reusable how-to knowledge about the systems (a form's required date format, \
+how a list is ordered), never for task data such as amounts, names or IDs: the organization keeps it for future runs \
+once this run is independently verified.
 - Keep the plan current with `update_plan` (mark items done, in_progress, blocked; re-plan when reality differs).
 
 ## Reliability
@@ -80,6 +83,7 @@ Re-observe the actual system state with your read-only tools and check each succ
 
 Rules:
 - You cannot change anything. Use only read-only tools (reading pages, files, GET requests).
+- If a system shows a login page, sign in with list_credentials + browser_fill_secret (you can authenticate but not change anything).
 - For each success criterion, find direct evidence in the real system (open the record, list the data, read the \
 file). A criterion passes only if you observed it. If you could not observe it, it fails.
 - Check exact values (amounts, dates, IDs, names), not just existence. Check for duplicates or unwanted side effects \

@@ -5,14 +5,15 @@
 
 const $ = (id) => document.getElementById(id);
 const TERMINAL = ["succeeded", "failed", "needs_attention", "cancelled"];
+const LIVE_STATUSES = ["pending", "queued", "running", "waiting_approval", "waiting_user", "verifying"];
 const NEUTRAL_ERRORS = ["denied", "skipped", "verification_failed", "finish_not_alone"];
 const STATUS_LABEL = {
-  idle: "Idle", pending: "Starting", running: "Running", waiting_approval: "Waiting for approval",
+  idle: "Idle", pending: "Starting", queued: "Queued", running: "Running", waiting_approval: "Waiting for approval",
   waiting_user: "Waiting for your answer", verifying: "Verifying", succeeded: "Succeeded", failed: "Failed",
   needs_attention: "Needs attention", cancelled: "Cancelled",
 };
 const PILL_CLASS = {
-  idle: "pill-idle", pending: "pill-running", running: "pill-running", waiting_approval: "pill-waiting",
+  idle: "pill-idle", pending: "pill-running", queued: "pill-queued", running: "pill-running", waiting_approval: "pill-waiting",
   waiting_user: "pill-waiting", verifying: "pill-verifying", succeeded: "pill-succeeded", failed: "pill-failed",
   needs_attention: "pill-attention", cancelled: "pill-cancelled",
 };
@@ -193,6 +194,7 @@ function setStatus(status) {
   const pill = $("run-pill");
   pill.className = `pill ${PILL_CLASS[status] || "pill-idle"}`;
   pill.textContent = STATUS_LABEL[status] || status;
+  if (S.mode === "db") updateRunButtons();
 }
 
 function tickTimer() {
@@ -223,7 +225,8 @@ function renderMemory(freshKey) {
   box.replaceChildren(h("table", null,
     h("thead", null, h("tr", null, h("th", null, "Key"), h("th", null, "Value"), h("th", null, "Source"))),
     h("tbody", null, facts.map((f) => h("tr", { class: f.key === freshKey ? "fresh" : "" },
-      h("td", { class: "k" }, f.key), h("td", { class: "v" }, f.value), h("td", { class: "s" }, f.source || ""))))));
+      h("td", { class: "k" }, f.key, f.durable ? h("span", { class: "tag tag-ok durable-tag", title: "Candidate for the organization's memory: saved only if this run is independently verified" }, "durable") : null),
+      h("td", { class: "v" }, f.value), h("td", { class: "s" }, f.source || ""))))));
 }
 
 const PLAN_MARK = { done: "✓", blocked: "!", skipped: "–", in_progress: "", pending: "" };
@@ -442,6 +445,8 @@ function approvalRights(risk) {
 
 function handleApprovalRequested(p) {
   const v = S.view;
+  if (v.pendingRequestId === p.request_id) return; // the same request again: its worker was replaced and the run re-attached
+  v.pendingRequestId = p.request_id;
   const note = h("input", { type: "text", placeholder: "Optional note (e.g. reason for denying)" });
   const approve = h("button", { class: "btn btn-approve", type: "button" }, "Approve");
   const similar = h("button", { class: "btn btn-approve-soft", type: "button", title: "Approve this and skip the prompt for similar actions in this run" }, "Approve all similar");
@@ -486,6 +491,7 @@ function handleApprovalResolved(p) {
   $("pending").replaceChildren();
   v.pendingCard = null;
   v.gate = null;
+  v.pendingRequestId = null;
   document.title = "CentrAlign Worker";
   const resp = p.response || {};
   const approved = !!resp.approved;
@@ -497,7 +503,7 @@ function handleApprovalResolved(p) {
     e.el.dataset.state = approved ? "ok" : "neutral";
     const badges = e.el.querySelector(".step-badges");
     const by = resp.by && (resp.by.name || resp.by.email) ? ` by ${resp.by.name || resp.by.email}` : "";
-    const label = !p.answered ? "no response" : approved ? (resp.remember ? `approved${by} (similar too)` : `approved${by}`) : `denied${by}`;
+    const label = !p.answered ? (p.reason || "no response") : approved ? (resp.remember ? `approved${by} (similar too)` : `approved${by}`) : `denied${by}`;
     badges.replaceChildren(riskTag(e.risk), h("span", { class: `tag ${approved ? "tag-ok" : "tag-warn"}` }, label));
     if (resp.note) e.el.append(h("div", { class: "step-note" }, `Note: ${resp.note}`));
   }
@@ -652,6 +658,18 @@ function handleEvent(ev) {
       noteRow("plan", "plan", `Plan updated: ${done}/${v.plan.length} items done`);
       break;
     }
+    case "run_queued":
+      $("empty")?.remove();
+      setStatus("queued");
+      append(h("div", { class: "task-card" }, h("div", { class: "label" }, "Task"), h("p", null, p.task || ""),
+        h("div", { class: "muted small" }, `queued · run ${S.runId.slice(0, 8)}`)));
+      break;
+    case "run_requeued":
+      setStatus("queued");
+      noteRow("guard", "resumed", p.reason === "worker_lost"
+        ? "The worker running this run was lost. The run is back in the queue and another worker will continue it from its last checkpoint."
+        : `The run went back to the queue (${p.reason || "handed over"}); another worker will continue it.`);
+      break;
     case "run_resumed": noteRow("guard", "resumed", p.message || "Run resumed after an interruption."); break;
     case "tool_started": handleToolStarted(p); break;
     case "tool_finished": handleToolFinished(p); break;
@@ -665,8 +683,17 @@ function handleEvent(ev) {
     case "verification_started": handleVerificationStarted(p); break;
     case "verification_finished": handleVerificationFinished(p); break;
     case "memory_updated":
-      v.facts.set(p.key, { key: p.key, value: String(p.value), source: p.source });
+      v.facts.set(p.key, { key: p.key, value: String(p.value), source: p.source, durable: !!p.durable });
       renderMemory(p.key);
+      break;
+    case "memory_recalled":
+      noteRow("memory", "plan", `Organization memory: ${(p.keys || []).length} note(s) from past verified runs added to the context (${(p.keys || []).join(", ")}).`);
+      break;
+    case "memory_saved":
+      noteRow("memory", "verify", `Saved to organization memory (the run was verified): ${(p.keys || []).join(", ")}${(p.updated || []).length ? ` (updated: ${p.updated.join(", ")})` : ""}.`);
+      break;
+    case "memory_rejected":
+      noteRow("memory", "guard", `Not saved to organization memory: ${(p.rejected || []).map((r) => `${r.key} (${r.detail || r.reason})`).join("; ")}.`);
       break;
     case "usage":
       v.waitRow = null; // a call went through again: the next outage gets a fresh note
@@ -785,11 +812,14 @@ async function resetEnvironment(quiet) {
 }
 
 function updateRunButtons() {
-  const busy = !!S.activeRunId;
-  $("run-btn").disabled = busy;
-  $("cancel-btn").disabled = !busy;
-  $("reset-btn").disabled = busy;
-  if (S.mode === "db" && S.me) {
+  const db = S.mode === "db";
+  // v1 runs one task at a time. In database mode runs queue up, so starting is always possible and Cancel
+  // applies to the run on screen.
+  const viewedLive = !!S.runId && !!S.view && LIVE_STATUSES.includes(S.view.status);
+  $("run-btn").disabled = db ? false : !!S.activeRunId;
+  $("cancel-btn").disabled = db ? !viewedLive : !S.activeRunId;
+  $("reset-btn").disabled = !!S.activeRunId; // the environment cannot be reset while any run of the org is live
+  if (db && S.me) {
     const mayRun = S.me.capabilities.start_runs;
     $("run-btn").classList.toggle("hidden", !mayRun);
     $("cancel-btn").classList.toggle("hidden", !mayRun);
@@ -824,9 +854,10 @@ async function startRun() {
 }
 
 async function cancelRun() {
-  if (!S.activeRunId) return;
+  const target = S.mode === "db" ? S.runId : S.activeRunId;
+  if (!target) return;
   try {
-    await api("POST", `/api/runs/${encodeURIComponent(S.activeRunId)}/cancel`);
+    await api("POST", `/api/runs/${encodeURIComponent(target)}/cancel`);
     toast("Cancelling... the agent stops at the next safe point.");
   } catch (err) { toast(err.message, "error"); }
 }
@@ -854,8 +885,13 @@ async function refreshHistory() {
       h("button", { class: `history-item ${r.id === S.runId ? "selected" : ""}`, type: "button", "data-run": r.id, onclick: () => loadRun(r.id) },
         h("span", { class: `dot dot-h-${r.status}` }),
         h("span", null, h("span", { class: "history-task" }, r.task || "(no task)"),
-          h("span", { class: "history-meta" }, `${STATUS_LABEL[r.status] || r.status} · ${relTime(r.started_at)}`
-            + (r.started_by ? ` · by ${r.started_by.name || r.started_by.email}` : "")))))));
+          h("span", { class: "history-meta" }, `${STATUS_LABEL[r.status] || r.status}${r.queue_position ? ` #${r.queue_position} in queue` : ""} · ${relTime(r.queued_at || r.started_at)}`
+            + (r.started_by ? ` · by ${r.started_by.name || r.started_by.email}` : "")
+            + (r.worker ? ` · on ${r.worker}` : "") + (r.resumed ? " · resumed" : "")))))));
+    const shown = runs.find((r) => r.id === S.runId);
+    if (shown && shown.status === "queued") {
+      $("timeline-meta").textContent = `waiting in the queue · position ${shown.queue_position || "?"}`;
+    }
   } catch (err) { /* server may be restarting */ }
 }
 
@@ -953,6 +989,7 @@ function showLogin(message) {
   S.signedIn = false;
   document.body.classList.add("signed-out");
   if (S.ws) { S.ws.onclose = null; S.ws.onmessage = null; try { S.ws.close(); } catch (e) { /* ignore */ } S.ws = null; }
+  if (window.stopApprovals) window.stopApprovals();
   $("login-screen").classList.remove("hidden");
   $("user-box").classList.add("hidden");
   $("main-nav").classList.add("hidden");
@@ -1019,6 +1056,8 @@ function applyMe() {
   $("org-name").textContent = org.name;
   sw.replaceChildren(...me.orgs.map((o) => h("option", { value: o.id, selected: o.id === org.id }, `${o.name} (${o.role})`)));
   $("main-nav").classList.remove("hidden");
+  $("nav-approvals").classList.remove("hidden");
+  $("nav-memory").classList.remove("hidden");
   document.querySelectorAll(".nav-btn[data-view=admin], .nav-btn[data-view=credentials]").forEach((b) => b.classList.toggle("hidden", !caps.admin));
   $("logout-link").classList.add("hidden");
   $("task").readOnly = !caps.start_runs;
@@ -1069,9 +1108,11 @@ async function loadRunMeta(runId) {
 }
 
 function showView(name) {
-  const views = { dashboard: "view-dashboard", admin: "view-admin", credentials: "view-credentials" };
+  const views = { dashboard: "view-dashboard", approvals: "view-approvals", memory: "view-memory", admin: "view-admin", credentials: "view-credentials" };
   Object.entries(views).forEach(([key, id]) => $(id).classList.toggle("hidden", key !== name));
   document.querySelectorAll(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
+  if (name === "approvals" && window.loadApprovalsPage) window.loadApprovalsPage();
+  if (name === "memory" && window.loadMemoryPage) window.loadMemoryPage();
   if (name === "admin" && window.loadAdminPage) window.loadAdminPage();
   if (name === "credentials" && window.loadCredentialsPage) window.loadCredentialsPage();
 }
@@ -1079,6 +1120,7 @@ function showView(name) {
 /* ------------------------------------------------------------------ boot */
 
 function startApp() {
+  if (S.mode === "db" && window.startApprovals) window.startApprovals();
   loadScenarios();
   refreshHistory();
   pollHealth();
@@ -1086,7 +1128,7 @@ function startApp() {
   S.started = true;
   setInterval(pollHealth, 4000);
   setInterval(tickTimer, 1000);
-  setInterval(refreshHistory, 15000);
+  setInterval(refreshHistory, S.mode === "db" ? 5000 : 15000);
 }
 
 function init() {

@@ -8,7 +8,7 @@ from typing import Any, Literal
 PlanStatus = Literal["pending", "in_progress", "done", "blocked", "skipped"]
 StepKind = Literal["llm", "tool", "approval", "ask_user", "verify", "system"]
 RunStatus = Literal[
-    "pending", "running", "waiting_approval", "waiting_user", "verifying",
+    "pending", "queued", "running", "waiting_approval", "waiting_user", "verifying",
     "succeeded", "failed", "needs_attention", "cancelled",
 ]
 TERMINAL_STATUSES = ("succeeded", "failed", "needs_attention", "cancelled")
@@ -66,12 +66,18 @@ def render_plan(plan: list[PlanItem]) -> str:
 
 @dataclass
 class Fact:
-    """A discovered piece of information with provenance (where it came from, at which step)."""
+    """A discovered piece of information with provenance (where it came from, at which step).
+
+    ``durable`` marks a candidate for the organization's long-term memory (reusable how-to knowledge about the
+    environment, not task data); ``scope`` names the system it concerns. A candidate is only ever written to the
+    organization's memory when the run passes independent verification (``worker/memory_store.py``)."""
 
     key: str
     value: str
     source: str = ""
     step: int = 0
+    durable: bool = False
+    scope: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> Fact:

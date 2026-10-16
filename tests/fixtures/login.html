@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign in - Portal</title></head>
+<body>
+<main>
+  <h1>Sign in</h1>
+  <div id="flash" role="alert" style="display:none"></div>
+  <form id="login" action="#" novalidate>
+    <label for="u">Username</label>
+    <input id="u" name="username" type="text">
+    <label for="p">Password</label>
+    <input id="p" name="password" type="password">
+    <label><input type="checkbox" name="remember"> Remember me</label>
+    <button type="submit">Sign in</button>
+  </form>
+
+  <form id="search" action="#" novalidate>
+    <input type="text" name="q" aria-label="Search invoices">
+    <button type="submit">Search</button>
+  </form>
+
+  <form id="signup" action="#" novalidate>
+    <label for="em">Email address</label>
+    <input id="em" name="email" type="email">
+    <label for="np">Choose password</label>
+    <input id="np" name="new_password" type="password">
+    <button type="submit">Sign up</button>
+  </form>
+
+  <form id="note" action="#" novalidate>
+    <label for="nt">Note</label>
+    <input id="nt" name="note" type="text">
+    <button type="submit">Save note</button>
+  </form>
+
+  <button type="button" id="del">Delete account</button>
+</main>
+<script>
+  document.getElementById('login').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var flash = document.getElementById('flash');
+    flash.textContent = 'Signed in as ' + document.getElementById('u').value;
+    flash.style.display = 'block';
+  });
+  for (const id of ['search', 'signup', 'note']) {
+    document.getElementById(id).addEventListener('submit', function (e) { e.preventDefault(); });
+  }
+</script>
+</body>
+</html>

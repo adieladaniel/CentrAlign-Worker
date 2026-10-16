@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import random
 import time
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, Protocol
 
 from jsonschema import Draft202012Validator
 
+from worker import metrics
 from worker.llm.base import (
     LLMClient,
+    LLMError,
     LLMResponse,
     Message,
     RateLimitError,
@@ -19,6 +22,51 @@ from worker.llm.base import (
     TransientLLMError,
     Usage,
 )
+
+log = logging.getLogger(__name__)
+
+
+class RateLimiter(Protocol):
+    """Decides when a call may start. ``acquire`` returns once the caller may send its request."""
+
+    async def acquire(self) -> None: ...
+
+
+class UsageSink(Protocol):
+    """Receives the token accounting of every LLM call (see ``worker/usage.py``). Must never be relied on to succeed."""
+
+    async def record(self, *, model: str, calls: int, input_tokens: int, output_tokens: int) -> None: ...
+
+
+class QuotaCheck(Protocol):
+    """Called before each call; raises ``QuotaExceededError`` when the caller's budget is used up."""
+
+    async def check(self) -> None: ...
+
+
+class LocalThrottle:
+    """The per-instance limiter: serializes calls and enforces a minimum interval between call starts."""
+
+    def __init__(
+        self,
+        min_interval_s: float,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self.min_interval_s = min_interval_s
+        self._sleep = sleep
+        self._clock = clock
+        self._lock = asyncio.Lock()
+        self._last_call_at: float | None = None
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            if self._last_call_at is not None:
+                wait = self.min_interval_s - (self._clock() - self._last_call_at)
+                if wait > 0:
+                    await self._sleep(wait)
+            self._last_call_at = self._clock()
 
 
 def validate_tool_calls(calls: list[ToolCall], tools: list[ToolSpec]) -> dict[str, str]:
@@ -47,6 +95,14 @@ class ResilientLLM(LLMClient):
     without internet. ``on_retry(info)`` (sync or async) is called before each network wait; an exception it
     raises aborts the call (the runner uses this to honor cancellation). Tool calls that name an unknown tool or violate the tool's schema
     trigger one corrective re-prompt; if the second answer is still invalid it is returned as-is.
+
+    Three optional seams serve the multi-user deployment (all default to today's behaviour):
+
+    * ``limiter``: decides when a call may start. The default is a ``LocalThrottle`` (``min_interval_s`` between call
+      starts of this instance); a shared limiter (``PgRateLimiter``) replaces it so parallel runs share one API key.
+    * ``quota``: ``await quota.check()`` before each call; it raises ``QuotaExceededError`` when the org's budget is gone.
+    * ``usage``: ``await usage.record(...)`` after every call that returned (or failed carrying a ``usage``). A failing
+      sink is logged and ignored: accounting never fails a call.
     """
 
     def __init__(
@@ -62,6 +118,9 @@ class ResilientLLM(LLMClient):
         on_retry: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
+        limiter: RateLimiter | None = None,
+        quota: QuotaCheck | None = None,
+        usage: UsageSink | None = None,
     ):
         self.inner = inner
         self.name = inner.name
@@ -74,8 +133,9 @@ class ResilientLLM(LLMClient):
         self.on_retry = on_retry
         self._sleep = sleep
         self._clock = clock
-        self._lock = asyncio.Lock()
-        self._last_call_at: float | None = None
+        self.limiter: RateLimiter = limiter or LocalThrottle(min_interval_s, sleep=sleep, clock=clock)
+        self.quota = quota
+        self.usage = usage
         self.calls = 0
         self.input_tokens = 0
         self.output_tokens = 0
@@ -137,14 +197,32 @@ class ResilientLLM(LLMClient):
         temperature: float,
         tool_choice: Literal["auto", "any", "none"],
     ) -> LLMResponse:
+        if self.quota is not None:
+            await self.quota.check()
+        try:
+            return await self._call_with_retries(messages, tools, temperature, tool_choice)
+        except LLMError as err:
+            await self._record_failed(err)
+            raise
+
+    async def _call_with_retries(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec] | None,
+        temperature: float,
+        tool_choice: Literal["auto", "any", "none"],
+    ) -> LLMResponse:
         attempt = 0
         net_attempts = 0
         net_since: float | None = None  # when the current network outage was first seen
         while True:
             await self._throttle()
+            attempt_started = self._clock()
             try:
                 response = await self.inner.complete(messages, tools, temperature=temperature, tool_choice=tool_choice)
             except (RateLimitError, TransientLLMError) as err:
+                metrics.llm_call(self._model_label(), "rate_limited" if isinstance(err, RateLimitError)
+                                 else "network" if err.network else "transient", self._clock() - attempt_started)
                 if isinstance(err, TransientLLMError) and err.network:
                     now = self._clock()
                     net_since = now if net_since is None else net_since
@@ -166,19 +244,43 @@ class ResilientLLM(LLMClient):
                 await self._sleep(self._backoff(attempt, err.retry_after))
                 attempt += 1
                 continue
+            except LLMError:
+                metrics.llm_call(self._model_label(), "error", self._clock() - attempt_started)
+                raise
+            metrics.llm_call(self._model_label(), "ok", self._clock() - attempt_started)
             self.calls += 1
             self.input_tokens += response.usage.input_tokens
             self.output_tokens += response.usage.output_tokens
+            await self._record(response.usage)
             return response
 
     async def _throttle(self) -> None:
-        """Serialize calls and enforce the minimum interval between call starts."""
-        async with self._lock:
-            if self._last_call_at is not None:
-                wait = self.min_interval_s - (self._clock() - self._last_call_at)
-                if wait > 0:
-                    await self._sleep(wait)
-            self._last_call_at = self._clock()
+        """Wait until the limiter lets this call start."""
+        started = self._clock()
+        await self.limiter.acquire()
+        metrics.LLM_RATELIMIT_WAIT.observe(max(0.0, self._clock() - started))
+
+    def _model_label(self) -> str:
+        """The model name used as a metric label (the model serving calls, else the client's name)."""
+        return str(self.active_model or getattr(self.inner, "model", None) or self.name)
+
+    async def _record(self, usage: Usage) -> None:
+        """Hand one call's token counts to the usage sink; a failing sink is logged, never raised."""
+        metrics.llm_tokens(self._model_label(), usage.input_tokens, usage.output_tokens)
+        if self.usage is None:
+            return
+        model = self._model_label()
+        try:
+            await self.usage.record(model=str(model), calls=1, input_tokens=usage.input_tokens,
+                                    output_tokens=usage.output_tokens)
+        except Exception as exc:  # noqa: BLE001 - accounting must never fail the call
+            log.warning("could not record LLM usage (%s)", type(exc).__name__)
+
+    async def _record_failed(self, err: LLMError) -> None:
+        """A call that failed but still consumed tokens (an error that carries a ``usage``) is accounted too."""
+        usage = getattr(err, "usage", None)
+        if isinstance(usage, Usage) and (usage.input_tokens or usage.output_tokens):
+            await self._record(usage)
 
     async def _notify_retry(self, info: dict[str, Any]) -> None:
         if self.on_retry is None:
