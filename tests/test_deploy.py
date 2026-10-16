@@ -129,7 +129,7 @@ def test_login_flow(make):
     ok = client.post("/login", data={"password": PASSWORD, "next": "/api/scenarios"})
     assert ok.status_code == 303 and ok.headers["location"] == "/api/scenarios"
     cookie = ok.headers["set-cookie"].lower()
-    assert "ca_auth=" in cookie and "httponly" in cookie
+    assert "ofa_auth=" in cookie and "httponly" in cookie
     assert client.get("/").status_code == 200
     assert client.get("/api/runs").status_code == 200
     with client.websocket_connect("/api/runs/abcd1234/events") as ws:  # authenticated socket gets through (unknown run -> error event)
@@ -149,11 +149,11 @@ def test_https_login_cookie_is_secure_samesite_none(make):
 
 def test_forged_and_foreign_cookies_are_rejected(make):
     other = make(ACCESS_PASSWORD=PASSWORD, SESSION_SECRET="one")
-    token = other.post("/login", data={"password": PASSWORD}).cookies["ca_auth"]
+    token = other.post("/login", data={"password": PASSWORD}).cookies["ofa_auth"]
     victim = make(ACCESS_PASSWORD=PASSWORD, SESSION_SECRET="two")
-    victim.cookies.set("ca_auth", token)
+    victim.cookies.set("ofa_auth", token)
     assert victim.get("/api/runs").status_code == 401
-    victim.cookies.set("ca_auth", "garbage")
+    victim.cookies.set("ofa_auth", "garbage")
     assert victim.get("/api/runs").status_code == 401
 
 
@@ -250,8 +250,8 @@ def test_proxy_sits_behind_the_password_and_hides_the_demo_cookie(make):
     assert client.post("/erp/echo", content=b"x").status_code == 401
     assert client.get("/company").status_code == 303
     client.post("/login", data={"password": PASSWORD})
-    echoed = client.get("/erp/echo", headers={"cookie": f"ca_auth={client.cookies['ca_auth']}; erp_session=abc"}).json()
-    assert "ca_auth" not in echoed["cookie"] and "erp_session=abc" in echoed["cookie"]
+    echoed = client.get("/erp/echo", headers={"cookie": f"ofa_auth={client.cookies['ofa_auth']}; erp_session=abc"}).json()
+    assert "ofa_auth" not in echoed["cookie"] and "erp_session=abc" in echoed["cookie"]
     assert client.get("/company").text == "sim landing"
 
 
@@ -279,7 +279,7 @@ def test_proxy_carries_a_tenant_entry_link_and_its_cookie_to_the_real_sim(make, 
     login = client.post("/erp/login", data=tenant.credentials["erp"])
     assert login.status_code == 303 and login.headers["location"] == "/erp/bills"
     assert "Company X Ltd" in client.get("/erp/bills").text
-    assert "ca_auth" in client.cookies and "sim_tenant" in client.cookies  # the gate cookie is separate and still ours
+    assert "ofa_auth" in client.cookies and "sim_tenant" in client.cookies  # the gate cookie is separate and still ours
 
 
 # --------------------------------------------------------------------------- run cap, flags
@@ -326,7 +326,8 @@ def test_unlimited_by_default(make):
 
 def test_cap_counter_rolls_over_at_utc_midnight():
     cap = DailyRunCap(2)
-    cap.record(); cap.record()
+    cap.record()
+    cap.record()
     assert not cap.allow() and cap.remaining() == 0
     cap._day = cap._day.replace(year=cap._day.year - 1)  # pretend the counter belongs to an earlier day
     assert cap.allow() and cap.remaining() == 2

@@ -17,12 +17,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from worker.agent.state import truncate
 from worker.auth import AuthService, OrgContext, require_db_role
 from worker.config import Settings
 from worker.db.models import Org
 from worker.memory_store import MAX_CONTENT_CHARS, MAX_SCOPE_CHARS, OrgMemoryStore
 from worker.org_settings import effective
-from worker.agent.state import truncate
 
 AUDIT_TEXT_LIMIT = 200
 

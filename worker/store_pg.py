@@ -13,11 +13,12 @@ the transaction commits). Artifacts stay in a local directory (``artifacts_root`
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert

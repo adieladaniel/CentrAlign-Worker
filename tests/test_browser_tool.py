@@ -17,8 +17,8 @@ from worker.tools import retry as retry_module
 from worker.tools.base import Risk, ToolContext
 from worker.tools.browser import (
     BrowserSession,
-    browser_tools,
     _is_login_form_field,
+    browser_tools,
     classify_element,
     close_browser,
     register_browser_tools,

@@ -2,7 +2,7 @@
 
     python scripts/bootstrap.py                       # uses DATABASE_URL from .env; prints a generated demo password once
     python scripts/bootstrap.py --demo-password ...   # choose the demo users' password
-    python scripts/bootstrap.py --reset [--yes]       # drop and recreate the `centralign` database first (asks to confirm)
+    python scripts/bootstrap.py --reset [--yes]       # drop and recreate the `oneforall` database first (asks to confirm)
     python scripts/bootstrap.py --provision-sim       # also create each demo org's own simulated company (sim must be running)
 """
 from __future__ import annotations

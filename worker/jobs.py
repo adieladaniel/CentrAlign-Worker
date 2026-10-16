@@ -36,8 +36,9 @@ import socket
 import sys
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -45,16 +46,20 @@ from worker import jobqueue, metrics
 from worker.agent.pg_broker import ApprovalSignals, PgBroker
 from worker.agent.runner import AgentRunner, ResumeError
 from worker.agent.toolset import build_registry
+from worker.approvals_pg import expire_overdue
 from worker.config import Settings, get_settings
 from worker.db.session import dispose_engine, get_sessionmaker
-from worker.approvals_pg import expire_overdue
-from worker.llm.base import LLMClient, LLMError
 from worker.health import check_ready
+from worker.llm.base import LLMClient, LLMError
 from worker.llm.factory import make_llm
 from worker.logging_setup import bind_context, log_context, setup_logging
 from worker.memory_store import attach_org_memory, commit_run_memory
 from worker.pg_listen import (
-    CHANNEL_APPROVAL_RESPONSES, CHANNEL_RUN_CONTROL, CHANNEL_RUNS_QUEUED, PgListener, dsn_of,
+    CHANNEL_APPROVAL_RESPONSES,
+    CHANNEL_RUN_CONTROL,
+    CHANNEL_RUNS_QUEUED,
+    PgListener,
+    dsn_of,
 )
 from worker.run_context import OrgRunContext, build_llm, load_org_run_context, pin_environment, settings_for_run
 from worker.store_pg import PgRunStore
@@ -255,7 +260,7 @@ class Worker:
                     return
                 try:
                     await asyncio.wait_for(self._wake.wait(), 0.1 if contended else self.poll_s)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
         except asyncio.CancelledError:
             pass

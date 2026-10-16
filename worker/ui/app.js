@@ -1,4 +1,4 @@
-/* CentrAlign Worker dashboard. Vanilla JS, no build step.
+/* OneForAll Agent dashboard. Vanilla JS, no build step.
  * All dynamic text goes through textContent / text nodes (see h()), so nothing from the agent or the
  * environment is ever interpreted as HTML. */
 "use strict";
@@ -483,7 +483,7 @@ function handleApprovalRequested(p) {
   v.pendingEntry = { el: entry, action: p.action || p.tool, risk: p.risk, tool: p.tool, args: p.args };
   append(entry);
   setStatus("waiting_approval");
-  document.title = "⚠ Approval needed - CentrAlign Worker";
+  document.title = "⚠ Approval needed - OneForAll Agent";
 }
 
 function handleApprovalResolved(p) {
@@ -492,7 +492,7 @@ function handleApprovalResolved(p) {
   v.pendingCard = null;
   v.gate = null;
   v.pendingRequestId = null;
-  document.title = "CentrAlign Worker";
+  document.title = "OneForAll Agent";
   const resp = p.response || {};
   const approved = !!resp.approved;
   const e = v.pendingEntry;
@@ -530,14 +530,14 @@ function handleQuestionAsked(p) {
   $("pending").replaceChildren(card);
   v.pendingCard = card;
   setStatus("waiting_user");
-  document.title = "❓ Question - CentrAlign Worker";
+  document.title = "❓ Question - OneForAll Agent";
   if (mayAnswer) setTimeout(() => answer.focus(), 50);
 }
 
 function handleQuestionAnswered() {
   $("pending").replaceChildren();
   S.view.pendingCard = null;
-  document.title = "CentrAlign Worker";
+  document.title = "OneForAll Agent";
   if (!TERMINAL.includes(S.view.status)) setStatus("running");
 }
 
@@ -587,7 +587,7 @@ function handleRunFinished(p) {
   const v = S.view;
   v.container = $("timeline");
   $("pending").replaceChildren();
-  document.title = "CentrAlign Worker";
+  document.title = "OneForAll Agent";
   setStatus(p.status);
   $("plan").classList.add("finished");
   S.finished = true;

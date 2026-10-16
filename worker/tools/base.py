@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, ClassVar
+from typing import Any, ClassVar
 
 from worker.config import Settings
 from worker.llm.base import ToolSpec

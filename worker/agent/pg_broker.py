@@ -134,7 +134,7 @@ class PgBroker(InteractionBroker):
             wait = self.poll_s if state["seconds_left"] is None else max(0.05, min(self.poll_s, state["seconds_left"] + 0.05))
             try:
                 await asyncio.wait_for(event.wait(), wait)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             event.clear()
 

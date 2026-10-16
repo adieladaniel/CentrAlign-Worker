@@ -1,4 +1,4 @@
-/* CentrAlign Worker dashboard, multi-user mode only: the Admin page (members, organization settings, environment,
+/* OneForAll Agent dashboard, multi-user mode only: the Admin page (members, organization settings, environment,
  * activity) and the Credentials page. Loaded after app.js and uses its helpers ($, h, api, toast, S, showView).
  * Text always goes through textContent / text nodes (see h()). Secret fields are write-only: this page never receives
  * a credential value from the server. */

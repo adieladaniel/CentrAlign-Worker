@@ -19,12 +19,12 @@ import re
 import secrets
 import shutil
 import sqlite3
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator
 
 from . import config
 

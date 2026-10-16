@@ -91,7 +91,7 @@ def stop(proc: subprocess.Popen, name: str, grace: float = 8.0) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the simulated company and the CentrAlign Worker dashboard.")
+    parser = argparse.ArgumentParser(description="Run the simulated company and the OneForAll Agent dashboard.")
     parser.add_argument("--open", action="store_true", help="Open the dashboard in the default browser.")
     parser.add_argument("--workers", type=int, default=1, metavar="N",
                         help="Worker processes that execute queued runs (database mode only; default 1).")
@@ -124,7 +124,7 @@ def main() -> int:
                 name = f"job worker {number}"
                 procs.append((name, spawn(name, "worker.jobs", "--worker-id", f"local-{number}")))
             print(f"[run] {max(args.workers, 0)} job worker(s) started: the API only queues runs, the workers execute them")
-        print(f"\n[run] CentrAlign Worker dashboard: {WORKER_URL}\n[run] press Ctrl+C to stop everything\n")
+        print(f"\n[run] OneForAll Agent dashboard: {WORKER_URL}\n[run] press Ctrl+C to stop everything\n")
         if args.open:
             webbrowser.open(WORKER_URL)
 

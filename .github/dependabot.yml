@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Python dependencies: Dependabot reads requirements*.txt (loose ranges, so it has little to bump) and updates
+  # minor/patch versions in one grouped PR per week; majors come as separate PRs. constraints.txt (the exact pins)
+  # is refreshed by hand, following the recipe in its header. A playwright bump must be matched by PLAYWRIGHT_VERSION
+  # in the Dockerfile (the image tag); the lint job fails when the two differ.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]

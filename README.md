@@ -1,4 +1,7 @@
-# CentrAlign Worker: an autonomous AI task worker
+# OneForAll Agent: an autonomous AI task worker
+
+![CI](https://github.com/<user>/<repo>/actions/workflows/ci.yml/badge.svg)
+<!-- Replace <user>/<repo> with your GitHub account and repository name once the repository exists. -->
 
 Give it a business task in plain language, for example *"Find the latest invoice from Company X, extract the amount and due date, enter it into our internal system, and tell me once it is done."* It plans the work, drives a real browser and other tools, recovers from failures, asks for approval before changing anything, checks its own result with an independent verifier, and reports with evidence.
 
@@ -19,7 +22,7 @@ It runs against a simulated company (mail inbox, vendor billing portal, internal
 7. [Scale and proof](#7-scale-and-proof)
 8. [Observability](#8-observability)
 9. [Demo](#9-demo)
-10. [Requirement-to-implementation map](#10-requirement-to-implementation-map)
+10. [Capability map](#10-capability-map)
 11. [Evaluation](#11-evaluation)
 12. [Testing](#12-testing)
 13. [Configuration reference](#13-configuration-reference)
@@ -72,6 +75,12 @@ pip install -r requirements.txt
 python -m playwright install chromium     # on Linux you may also need: python -m playwright install-deps chromium
 ```
 
+Two extra files support development and CI: [requirements-dev.txt](requirements-dev.txt) (ruff, pip-audit, actionlint-py) and [constraints.txt](constraints.txt) (the exact versions the suite is verified against; the same `playwright` version as the Dockerfile). To get exactly what CI uses:
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
+```
+
 ### 1.2 Get a free Gemini API key and configure `.env`
 
 1. Open <https://aistudio.google.com/apikey> and sign in with a Google account.
@@ -116,7 +125,7 @@ Events print to the terminal, and approvals and questions are answered at the pr
 2. **Point `.env` at it:**
 
    ```ini
-   DATABASE_URL=postgresql+asyncpg://postgres:YOUR_PASSWORD@localhost:5432/centralign
+   DATABASE_URL=postgresql+asyncpg://postgres:YOUR_PASSWORD@localhost:5432/oneforall
    ```
 
    (`postgresql://` and `postgres://` are accepted too; the password is masked in every log line and message.)
@@ -126,7 +135,7 @@ Events print to the terminal, and approvals and questions are answered at the pr
    python scripts/bootstrap.py --demo-password "choose-a-password"
    ```
 
-   This creates the database named in `DATABASE_URL` (`centralign` above) if it is missing, applies the Alembic migrations, and seeds two demo organizations. Without `--demo-password` a random one is generated and **printed once**, the first time the users are created; re-running never changes existing passwords.
+   This creates the database named in `DATABASE_URL` (`oneforall` above) if it is missing, applies the Alembic migrations, and seeds two demo organizations. Without `--demo-password` a random one is generated and **printed once**, the first time the users are created; re-running never changes existing passwords.
 
    | Organization | Users (all `@acme.test` / `@globex.test`) |
    |---|---|
@@ -287,7 +296,7 @@ The LLM never decides whether to ask. Each tool declares a risk, and calls can b
 
 When the agent claims success, [worker/agent/verifier.py](worker/agent/verifier.py) runs a separate, short LLM conversation. It sees only the task, the success criteria, the claim, and the memory facts; it does not see the agent's reasoning. It has only the read-only subset of the tools and must re-observe the world (open the bill, compare amount and due date, look for duplicates) and submit one check per criterion with what it actually saw. A verdict with no checks, or any failed check, is downgraded to failed. This targets the classic failure of agents that report success after a form silently did not save. Failed audits feed their findings back into the loop (up to 2 correction rounds); an audit that cannot complete is reported as unverified (`needs_attention`) instead of passed.
 
-The auditor can **sign in** when it has to: it may use `browser_fill_secret` on a login form's fields and click "Sign in" (a click classified READ). This matters after a crash and resume, where the fresh browser has no session and the auditor would otherwise be unable to see the portal. It still cannot change anything: any other typing, selecting, key press, non-GET request, file write or save click is refused, and a form that is not a login form (its submit buttons are not all READ) is not fillable. The load test found this gap, see [docs/SCALING.md](docs/SCALING.md).
+The auditor can **sign in**, and nothing else. After a crash and resume the fresh browser has no portal session, and a read-only auditor would be blind. So `browser_fill_secret` is in the verifier's tool subset (a `Tool.verifier_allowed` flag), and in read-only mode it works only on the fields of a *login form*: a text, e-mail or password `<input>` inside a form whose visible submit controls are all classified read ("Sign in", "Log in", "Search"; at least one) and which has a password field or a sign-in button. The "Sign in" click is read, so it passes. Everything else is still refused in read-only mode: other typing, selects, and write or irreversible clicks (`browser_type` is not in the verifier's toolset at all). The verifier prompt tells it to sign in through `list_credentials` + `browser_fill_secret` when it meets a login page. The load test found this gap; with the fix the first audit after a resume passes, and the policy agent's second-round "audit_resync" workaround remains only as a fallback ([docs/SCALING.md](docs/SCALING.md)).
 
 ### 3.7 Guards that escalate to a human instead of thrashing
 
@@ -311,7 +320,7 @@ No LangChain, LlamaIndex or similar. The runner is one file of about 650 lines a
 
 ### 3.12 Gemini free tier behind a provider adapter
 
-Zero cost was a requirement, so the default is the Gemini free tier with native function calling via the `google-genai` SDK. [worker/llm/base.py](worker/llm/base.py) defines a neutral message and tool-spec format, so Gemini and Ollama (and scripted fakes for tests) are interchangeable. A `ResilientLLM` wrapper adds the pieces free tiers need: retry with backoff that honours the server's retry hint on 429/5xx, JSON-schema validation of tool arguments with one corrective re-prompt, and token accounting. A `FailoverLLM` walks a chain of models: a model whose daily free-tier quota is gone (the free tier allows only a handful of requests per model per day) is skipped until the next reset and the run continues on the next one, mid-run, because the prompt is rebuilt from state every turn. In multi-user mode the throttle, the "which models are exhausted" memory, the usage ledger and the per-org daily budgets all live in PostgreSQL (3.16). Ollama is the offline fallback, but a 4 GB laptop GPU (RTX 3050) only fits roughly 3B-parameter models, which were not reliable enough at multi-step tool calling to be the primary path.
+Zero cost was a goal, so the default is the Gemini free tier with native function calling via the `google-genai` SDK. [worker/llm/base.py](worker/llm/base.py) defines a neutral message and tool-spec format, so Gemini and Ollama (and scripted fakes for tests) are interchangeable. A `ResilientLLM` wrapper adds the pieces free tiers need: retry with backoff that honours the server's retry hint on 429/5xx, JSON-schema validation of tool arguments with one corrective re-prompt, and token accounting. A `FailoverLLM` walks a chain of models: a model whose daily free-tier quota is gone (the free tier allows only a handful of requests per model per day) is skipped until the next reset and the run continues on the next one, mid-run, because the prompt is rebuilt from state every turn. In multi-user mode the throttle, the "which models are exhausted" memory, the usage ledger and the per-org daily budgets all live in PostgreSQL (3.16). Ollama is the offline fallback, but a 4 GB laptop GPU (RTX 3050) only fits roughly 3B-parameter models, which were not reliable enough at multi-step tool calling to be the primary path.
 
 ### 3.13 Design rules that came from failures I expected
 
@@ -379,6 +388,7 @@ Every tenant-owned table carries an `org_id`, and the run store, approval store 
 - **Encrypted at rest.** The secret fields of a credential are sealed with Fernet (`VAULT_KEY`; required when `DEPLOY_MODE` is on) into one token; the table keeps only non-secret metadata (name, kind, description, URL and host hint, field *names*) in clear. The admin credentials API and page never return values; secret fields are write-only (blank means "keep the stored one").
 - **The model never sees a secret.** It gets credential names ("credentials available: erp, portal, mail"). `browser_fill_secret(ref, credential, field)` types the value straight into a text or password `<input>` inside the worker process; the observation says `•••• (credential erp.password)`. Textareas are refused on purpose: a free-text box is where a prompt-injected agent would copy a secret to.
 - **Host-bound credentials.** A credential may carry a host; it is typed only into a page on that host (or a subdomain) and sent only to that host, even if the HTTP allowlist would permit others. Filling is classified read (it commits nothing); the submit click is classified and gated as usual.
+- **The read-only verifier may authenticate, nothing more.** `browser_fill_secret` is the one write-capable tool it gets (flag `verifier_allowed`), and in read-only mode it only fills the fields of a login form (all submit buttons read-classified, with a password field or a sign-in button); the host binding and redaction still apply, and every other typing, selecting or write click is refused.
 - **Hidden credentials.** The organization's tenant entry token and its own Gemini key are stored in the same vault but never listed to the agent or the credentials page.
 - **Redaction choke points.** A per-run `Redactor` replaces secret values and their common encodings (URL, HTML, JSON-escaped, base64) with `[REDACTED:erp.password]`. It is applied to: tool results (inside `execute_with_retry`, so the runner and the verifier both get clean observations); steps, events, approval payloads, the plan, facts and the report (in the runner); the complete message list right before every LLM call (also the verifier's); and every write to the run store (`RedactingStore`). A log filter scrubs the same values, database URLs, API-key headers and bearer tokens from log records when they are created. Secrets typed into a task are redacted before the task is stored.
 - `python -m worker.vault put|list|delete|rotate-key|generate-key` manages the **file** vault of single-user mode; in multi-user mode credentials are managed on the Credentials page.
@@ -386,7 +396,7 @@ Every tenant-owned table carries an `org_id`, and the run store, approval store 
 ### 4.5 Identity, sessions and the audit log
 
 - **Passwords** are hashed with argon2id. The password check runs for unknown and deactivated accounts too (against a dummy hash), so neither the answer nor its timing reveals whether an e-mail exists.
-- **Sessions** are rows in PostgreSQL; the cookie `ca_session` holds a random 256-bit token (HttpOnly, SameSite=Lax, Secure when `DEPLOY_MODE`) and only its SHA-256 is stored, so a database leak cannot be replayed. Idle timeout 12 h (sliding) and an absolute limit of 7 days, both configurable; logout, deactivation and org changes revoke sessions.
+- **Sessions** are rows in PostgreSQL; the cookie `ofa_session` holds a random 256-bit token (HttpOnly, SameSite=Lax, Secure when `DEPLOY_MODE`) and only its SHA-256 is stored, so a database leak cannot be replayed. Idle timeout 12 h (sliding) and an absolute limit of 7 days, both configurable; logout, deactivation and org changes revoke sessions.
 - **Login throttling.** Failed sign-ins are counted per e-mail (5) and per client address (20) in fixed 15-minute windows; over the limit the answer is 429 with `Retry-After`, and every failure is answered after an exponentially growing pause (0.5 s doubling, at most 8 s).
 - **CSRF.** SameSite=Lax cookies, plus a guard that refuses state-changing requests the browser itself marks `Sec-Fetch-Site: cross-site` (403). WebSocket handshakes check the `Origin` against the host.
 - **Audit log.** An append-only table records sign-ins (also failed ones), sign-outs, org switches, run start and cancel, every approval and answer, member changes, setting changes, credential changes, environment provision and reset, and memory saves, edits and deletions. Admins read it under **Admin > Recent activity**.
@@ -407,7 +417,7 @@ Every tenant-owned table carries an `org_id`, and the run store, approval store 
 
 - **Transient vs. semantic errors, idempotency-aware retries.** See [3.8](#38-transient-vs-semantic-errors-handled-at-different-layers): transient failures of repeat-safe calls are retried with backoff in the tool layer; a failed write is never re-sent blindly (the agent is told to check whether it took effect); semantic errors go back to the model with an actionable message.
 - **Guards.** Step budget, active-time timeout, failure streaks, repetition detection, escalation to a human instead of thrashing ([3.7](#37-guards-that-escalate-to-a-human-instead-of-thrashing)).
-- **An independent verifier** with fresh context and read-only tools, feeding failures back for up to two correction rounds ([3.6](#36-an-independent-verifier-with-fresh-context-and-read-only-tools)). It can sign in through the vault (fill credentials into login forms and click "Sign in") but cannot change anything, so a resumed run's fresh browser does not blind the audit.
+- **An independent verifier** with fresh context and read-only tools, feeding failures back for up to two correction rounds ([3.6](#36-an-independent-verifier-with-fresh-context-and-read-only-tools)). It can sign in through the vault (`browser_fill_secret` into the fields of a login form, then the "Sign in" click, which is classified read) but is still refused everything else, so a resumed run's fresh browser does not blind the audit; the first audit after a resume now passes.
 - **Crash recovery.** A worker holds a run through a *lease* it renews with a *heartbeat* (every third of `JOB_LEASE_S`). If the worker dies, its leases expire; every worker also runs a *reaper* that puts expired runs back in the queue (`FOR UPDATE SKIP LOCKED`, so reapers do not collide), and the next claim *resumes* from the checkpoint with a note that the browser was restarted. After `JOB_MAX_ATTEMPTS` claims the run ends `needs_attention` ("lost too many times"). A graceful stop (Ctrl+C, SIGTERM) hands runs back without using an attempt; `--drain` lets them finish instead. If a heartbeat finds the lease gone, the old worker is *fenced* (its writes are dropped) and cancels the run locally. Load-tested: a hard worker kill with four runs in flight, twice, all four resumed and succeeded each time ([section 7](#7-scale-and-proof)).
 - **Durable approvals.** An approval is a row. Any API process can record the answer; the **first writer wins** (a second answer is a 409); an answer past its deadline is refused. A request expires after `approval_timeout_s` (an org setting, default 1 hour): the run then ends `needs_attention` with "approval expired after N min" rather than guessing. API restarts lose nothing; a resumed run **re-attaches** to its still-open request (or takes an answer that arrived while no worker was waiting) instead of asking twice, and cancels a leftover request the resumed agent no longer asks for.
 - **Service restarts.** Sessions and approvals are in PostgreSQL, so an API restart only drops open WebSockets (clients reconnect and replay); a database restart pauses the listeners, which reconnect and re-read.
@@ -485,7 +495,7 @@ The recording shows, in order (shot-by-shot script, with an optional multi-user 
 
 ---
 
-## 10. Requirement-to-implementation map
+## 10. Capability map
 
 | Capability | How it is implemented | Where |
 |---|---|---|
@@ -538,27 +548,67 @@ python -m evals.run --parallel 3                     # 3 scenarios at once, each
 
 Other flags: `--headed`, `--provider gemini|ollama`, `--sim-url`, `--scenarios-dir`. The runner starts the simulator itself if nothing is listening on `SIM_BASE_URL`, resets it with each scenario's chaos flags, runs the real agent in-process with scripted approvals and answers, then judges the result from the simulator's data, never from the agent's claim: if the agent says `succeeded` while the ground truth disagrees, it is flagged as a **false success**. It needs a valid `GEMINI_API_KEY`, makes real LLM calls, and takes several minutes on the free tier. Results print as a table and are written to `evals/results/latest.md` (plus a timestamped JSON). Exit code: 0 all passed, 1 some failed, 2 setup problem.
 
-**Status of the real-Gemini results, honestly:** the full table is **pending a rerun**. The only real-model results on file are three single-scenario runs of `invoice_happy` on 2026-10-03: two ended `needs_attention` because the model could not be reached (a free-tier quota error and a DNS outage), with no wrong write (ground truth: no bill, no stray bill), and the third passed, which is what [evals/results/latest.md](evals/results/latest.md) shows:
+**Real-Gemini results (2026-10-16, free tier, 5 scenarios, one run each).** Full table: [evals/results/latest.md](evals/results/latest.md).
 
-| Scenario | Chaos | Agent said | Ground truth | Score | Steps | LLM calls | Tokens | Model | Time |
-|---|---|---|---|---|---|---|---|---|---|
-| `invoice_happy` | - | succeeded | PASS | 1.00 | 33 | 24 | 134,557 | gemini-2.5-flash (+6 switch) | 303 s |
+| Scenario | Agent said | Ground truth | Model the run ended on | What the trace shows |
+|---|---|---|---|---|
+| `invoice_happy` | needs_attention | **PASS** | gemini-3.8-flash | The bill is fully correct, including the issue date. The run hit the 40-action step budget right after saving, because the agent wasted steps (it tried a guessed ERP password, re-read `credentials.json` three times, opened a stray workspace file). |
+| `invoice_server_error` | needs_attention | FAIL | gemini-2.5-flash-lite | It filled the form, met the injected 500 and the session expiry, and ran out of step budget while recovering. On the weakest model in the chain it also answered several turns without a tool call. No wrong or duplicate write. |
+| `invoice_ambiguous_vendor` | succeeded | **FALSE SUCCESS** | gemini-3.5-flash-lite | It picked "Company X Ltd" from the vendor dropdown without noticing "Company X Holdings", so it never asked. The bill it made is correct, but it should have asked, and the verifier did not flag the ambiguity. The eval harness caught it. |
+| `reply_payment_date` | succeeded | **PASS** | gemini-3.5-flash-lite | Correct reply with the due date. |
+| `deny_write` | needs_attention | **PASS** | gemini-3.5-flash-lite | The approval was denied, nothing changed, and the agent reported honestly. |
 
-The other seven scenarios have not been recorded against the real model since the v1 implementation; do not read their absence as a pass. They are exercised by the unit tests with a scripted LLM, and the multi-user platform is exercised end to end by the load test with the policy LLM ([section 7](#7-scale-and-proof)). LLM behaviour varies between runs (`--repeat N` helps); treat any single table as a sample, not a guarantee.
+**3 of 5 passed, 1 false success, and no wrong or duplicate writes in any run.** Four of the five runs finished on "lite" models, because the stronger free-tier models were overloaded (HTTP 503) or out of daily quota and the failover chain moved down the list; the results therefore partly measure free-tier model availability.
+
+Changes made after this run, in response to the traces (not yet re-measured against the real model):
+- The step budget default is raised from 40 to 60 actions (`MAX_STEPS`); bookkeeping tools still do not count.
+- The worker prompt now tells the agent to check for several matching entries before picking from a list, dropdown or search result and to ask when nothing tells them apart; never to try a guessed login; and not to re-read a file whose content is already in working memory.
+- The verifier prompt now fails a check when the task's wording matches more than one entity and the worker neither asked nor justified its choice.
+- The stray file `workspace/report.txt`, left by an earlier test, is removed.
+
+The other scenarios (`invoice_duplicate`, `invoice_portal_missing`, `month_backfill`) were not run against the real model in this pass because of the free-tier quota; do not read their absence as a pass. All scenarios are exercised by the unit tests with a scripted LLM, and the multi-user platform end to end by the load test with the policy LLM ([section 7](#7-scale-and-proof)). LLM behaviour varies between runs (`--repeat N` helps); treat any single table as a sample, not a guarantee.
 
 ---
 
 ## 12. Testing
 
 ```bash
-python -m pytest -q            # 617 tests
+python -m pytest -q            # 622 tests
 ```
 
 The count comes from `python -m pytest -q --co` (collect only). No API key and no network are needed: the model is replaced by a scripted fake (or the policy stand-in). The suite takes a few minutes because many tests start Chromium or PostgreSQL.
 
 What it covers: the simulator and its tenants; the tool framework, retry rules and risk classification; the browser tool and snapshot against local HTML fixtures and the browser pool (needs Chromium); context building; guards; the runner end to end with a scripted LLM (including verifier failure, recovery, checkpoint and resume); the Gemini, Ollama, failover, shared limiter, model-health and usage layers; the stores (the same contract tests run against the file store and the PostgreSQL store); authentication, roles, separation of duties and quotas; organization isolation (a foreign id is a 404 everywhere, including WebSockets); the queue (concurrent claims, the daily quota, lost workers, resume, graceful shutdown and drain); durable approvals (answer from another API process, first writer wins, expiry, re-attach after resume, the inbox stream); the vault and redaction (secrets never appear in steps, events or prompts); organization memory (the write gate, screening, recall, governance); observability; and the policy LLM.
 
-**Database tests use a separate test database.** `DATABASE_URL` supplies the server and credentials, and the tests replace the database name with `centralign_test`, which is dropped and recreated at the start of the session, migrated once, emptied between tests and dropped at the end; the development database is never touched. To run two pytest sessions at once, give each its own: `CENTRALIGN_TEST_DB=centralign_test_a`. Without a reachable PostgreSQL the tests that need it are **skipped**, not failed. The fixtures default to `AUTH_MODE=file` so a `DATABASE_URL` in your `.env` does not change the v1 tests; the multi-user tests ask for database mode explicitly.
+**Database tests use a separate test database.** `DATABASE_URL` supplies the server and credentials, and the tests replace the database name with `oneforall_test`, which is dropped and recreated at the start of the session, migrated once, emptied between tests and dropped at the end; the development database is never touched. To run two pytest sessions at once, give each its own: `ONEFORALL_TEST_DB=oneforall_test_a`. Without a reachable PostgreSQL the tests that need it are **skipped**, not failed. The fixtures default to `AUTH_MODE=file` so a `DATABASE_URL` in your `.env` does not change the v1 tests; the multi-user tests ask for database mode explicitly.
+
+
+### 12.1 Continuous integration
+
+GitHub Actions workflows live in [.github/workflows/](.github/workflows). Replace `<user>/<repo>` in the badge at the top of this file after you create the repository.
+
+| Workflow | When | What it does |
+|---|---|---|
+| `ci.yml` | every push, pull request, manual | **lint**: `ruff check .` and `actionlint` on the workflows. **test-fast**: the whole suite in file mode without a database (the 145 PostgreSQL tests skip by design), Chromium installed and cached, JUnit XML uploaded, pass/fail/skip counts in the job summary. **test-full** (after lint): the whole suite against a `postgres:18` service container; the job **fails if any database test was skipped**; it also runs `python -m worker.db migrate` and `check` on a scratch database. **docker**: builds the image (not pushed) and curls `/healthz` on the running container. |
+| `security.yml` | push to `main`, pull requests, weekly | **gitleaks** over the whole git history (the CLI, so no licence key is needed; allowlist in [.gitleaks.toml](.gitleaks.toml) covers only the fake simulator and test-fixture credentials). **pip-audit** on `constraints.txt` and on a fresh resolve of `requirements.txt`; it reports in the job summary and as warnings but does not fail the build, because pip-audit cannot filter by severity. |
+| `nightly.yml` | nightly, manual | A small load test (2 orgs, 4 users each, 6 runs, 1 worker x 2 slots, policy LLM, no Gemini) against a PostgreSQL service. Fails if the ground-truth pass rate is below 100% or anything leaked between organizations. Results are uploaded and shown in the summary. |
+| `evals.yml` | manual only | Runs `python -m evals.run` against real Gemini for the scenarios and repeat count you choose (default: the five core scenarios, once). Skips with a clear message if the secret is missing. Uploads `latest.md` and the JSON. |
+| `dependabot.yml` | weekly | Grouped minor/patch update PRs for pip and for the actions. |
+
+The only secret any workflow reads is `GEMINI_API_KEY`, and only `evals.yml` does (Settings > Secrets and variables > Actions > New repository secret). The database password in the workflows is a throwaway value for a container that exists only for the job.
+
+Run the same checks locally:
+
+```bash
+ruff check .                                   # lint (rules in pyproject.toml; the code is not auto-formatted)
+python -m pytest -q                            # whole suite; without DATABASE_URL the PostgreSQL tests skip
+actionlint                                     # the workflow files (installed by requirements-dev.txt)
+pip-audit -r constraints.txt --no-deps --disable-pip
+```
+
+A `DATABASE_URL` in your `.env` makes the suite run the database tests too (against `oneforall_test`, never your data). To reproduce the file-mode job exactly, override it for one run: `DATABASE_URL= python -m pytest -q` (PowerShell: `$env:DATABASE_URL=""; python -m pytest -q`; an environment variable beats `.env`). To get the same result as the full job set `DATABASE_URL` to a PostgreSQL server you can create databases on and `ONEFORALL_TEST_DB` to a name starting with `oneforall_test`.
+
+Recommended branch protection for `main` (Settings > Branches > Add rule): require a pull request before merging, require status checks to pass with `Lint (ruff, actionlint)`, `Tests (file mode, no database)`, `Tests (full, PostgreSQL 18)` and `Docker image builds and starts` selected (they only appear in the list after a first run), require branches to be up to date, and block force pushes. Add `gitleaks` from the Security workflow if you want secret scanning to block merges as well.
 
 ---
 
@@ -584,7 +634,7 @@ Settings come from environment variables or `.env` (names match [worker/config.p
 | | `BROWSER_MAX_CONTEXTS`, `BROWSER_ACQUIRE_TIMEOUT_S` | 8, 60 | open run contexts per process; wait for a free one |
 | | `HTTP_ALLOWED_HOSTS` | `localhost,127.0.0.1` | hosts `http_request` may call |
 | Agent | `APPROVAL_MODE` | `confirm_writes` | `auto`, `confirm_writes`, `confirm_all` (in multi-user mode the org's setting, with this as its default) |
-| | `MAX_STEPS`, `MAX_CONSECUTIVE_FAILURES`, `RUN_TIMEOUT_S` | 40, 4, 900 | guards (org settings override `MAX_STEPS` and `RUN_TIMEOUT_S`) |
+| | `MAX_STEPS`, `MAX_CONSECUTIVE_FAILURES`, `RUN_TIMEOUT_S` | 60, 4, 900 | guards (org settings override `MAX_STEPS` and `RUN_TIMEOUT_S`) |
 | Database | `DATABASE_URL` | empty | PostgreSQL URL; empty means single-user mode |
 | | `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT_S` | 10, 10, 30 | connection pool per process |
 | Auth | `AUTH_MODE` | `auto` | `auto`, `file` (ignore the database for sign-in) or `db` |
@@ -652,7 +702,7 @@ In priority order:
 
 ## 16. Assumptions
 
-- The reviewer has Python 3.11+, can install Chromium through Playwright, and can create a free Google AI Studio key. For the multi-user mode they can install PostgreSQL and create a database.
+- The reader has Python 3.11+, can install Chromium through Playwright, and can create a free Google AI Studio key. For the multi-user mode they can install PostgreSQL and create a database.
 - "Using a computer" means a real browser plus files and HTTP against web applications. A simulated company is acceptable because real accounts cannot be shared, and it lets failure modes be injected and checked deterministically.
 - "Latest invoice" means the most recent issue date, not the highest internal id or the first row.
 - The company name "Company X" in the task is ambiguous only when the environment contains an alias; otherwise it maps to "Company X Ltd".
@@ -693,9 +743,11 @@ No agent framework (LangChain, LlamaIndex, AutoGen and similar) is used, deliber
 ## 18. Project structure
 
 ```
-CentrAlignAI/
+oneforall-agent/
 ├── run.py                    start simulator (:8001) + API/dashboard (:8000) [+ N workers in database mode]
 ├── requirements.txt  pytest.ini  alembic.ini  .env.example  Dockerfile  .gitignore
+├── requirements-dev.txt  constraints.txt  pyproject.toml  .gitleaks.toml    dev tools, exact pinned versions, ruff config, secret-scan allowlist
+├── .github/                  workflows/ (ci, security, nightly, evals), scripts/ (summary helpers), dependabot.yml
 ├── scripts/
 │   ├── bootstrap.py          create the database, migrate, seed demo orgs/users, --provision-sim
 │   └── loadtest.py           the load test (writes docs/loadtest-results.json and .md)
@@ -741,7 +793,7 @@ CentrAlignAI/
 │   │                         files.py  http.py  secrets.py  memory_tools.py  interaction.py  control.py
 │   └── ui/                   index.html  app.js  admin.js  approvals.js  memory.js  styles.css (dashboard)
 ├── evals/                    scenarios/*.yaml, run.py (runner), checkers.py, scenarios.py, simstate.py, results/
-├── tests/                    617 tests (scripted LLM, local HTML fixtures, a throwaway PostgreSQL database)
+├── tests/                    622 tests (scripted LLM, local HTML fixtures, a throwaway PostgreSQL database)
 ├── workspace/                the agent's "shared drive": credentials.json, README.txt
 ├── docs/                     ARCHITECTURE.md  MULTI_USER.md  SCALING.md  DEMO_SCRIPT.md  loadtest-results.md/.json
 └── runs/                     (generated) per-run screenshots, downloads, report.md; file-mode run logs
@@ -783,7 +835,7 @@ Admin endpoints (open unless `SIM_ADMIN_TOKEN` is set; localhost only): `GET/POS
 
 | Symptom | Fix |
 |---|---|
-| `DATABASE_URL is not set` / `error: could not bootstrap` / a connection error | Check the URL in `.env` (`postgresql+asyncpg://postgres:PASSWORD@localhost:5432/centralign`), that the PostgreSQL service is running, and run `python -m worker.db check`: it prints the masked URL, the server version and the migration state without ever printing the password. The bootstrap connects to the `postgres` database to create `centralign`, so the role must be allowed to create databases. |
+| `DATABASE_URL is not set` / `error: could not bootstrap` / a connection error | Check the URL in `.env` (`postgresql+asyncpg://postgres:PASSWORD@localhost:5432/oneforall`), that the PostgreSQL service is running, and run `python -m worker.db check`: it prints the masked URL, the server version and the migration state without ever printing the password. The bootstrap connects to the `postgres` database to create `oneforall`, so the role must be allowed to create databases. |
 | Log says "The database schema is at revision X but the code needs Y"; `/readyz` returns 503 with `migrations` not ok | Run `python -m worker.db migrate` (or `python scripts/bootstrap.py`, which also migrates). |
 | Runs stay `queued` | No worker is running (`python run.py --workers N` or `python -m worker.jobs`), the org is at its `max_concurrent_runs` (default 2; they wait for a free slot), or workers cannot reach the database. The Admin page's System card shows the queue and the workers holding runs. |
 | `This organization has no environment yet` (409) when starting a run | Provision the org's simulated company: `python scripts/bootstrap.py --provision-sim` (the simulator must be running), or **Admin > Provision environment**. A 502 there means the simulator is not reachable at `SIM_BASE_URL`. |

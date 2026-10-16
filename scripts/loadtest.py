@@ -5,7 +5,7 @@
 
 What it starts (all as subprocesses of this script, on ports from ``--base-port``, never 8000/8001):
 
-* a throwaway database ``centralign_load`` (created, migrated, dropped at the end unless ``--keep-db``; the dev database is never touched),
+* a throwaway database ``oneforall_load`` (created, migrated, dropped at the end unless ``--keep-db``; the dev database is never touched),
 * the simulated company with a temporary data dir (one isolated tenant per org),
 * the API (``uvicorn worker.server:app``) and N worker processes (``python -m worker.jobs --concurrency K``),
   all with ``LLM_PROVIDER=policy``: a deterministic stand-in for the model (``worker/llm/policy.py``) that really drives
@@ -202,12 +202,12 @@ def parse_args(argv: list[str] | None = None) -> Config:
     p.add_argument("--out", default="docs/loadtest-results.json")
     p.add_argument("--base-port", type=int, default=8601, help="API port; the simulator takes the next one, worker metrics start at 9601")
     p.add_argument("--seed", type=int, default=7)
-    p.add_argument("--db-name", default="centralign_load", help="must start with centralign_load")
+    p.add_argument("--db-name", default="oneforall_load", help="must start with oneforall_load")
     a = p.parse_args(argv)
     if a.users < 4:
         p.error("--users must be at least 4")
-    if not a.db_name.startswith("centralign_load"):
-        p.error("--db-name must start with 'centralign_load' (the dev database is never used)")
+    if not a.db_name.startswith("oneforall_load"):
+        p.error("--db-name must start with 'oneforall_load' (the dev database is never used)")
     if a.base_port in (8000, 8001) or a.base_port + 1 in (8000, 8001):
         p.error("ports 8000/8001 belong to the dev stack")
     return Config(profile=a.profile, orgs=a.orgs, users=a.users, runs=a.runs, workers=a.workers, concurrency=a.concurrency,
@@ -243,7 +243,7 @@ class Stack:
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.tmp = Path(tempfile.mkdtemp(prefix="centralign_load_"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="oneforall_load_"))
         (self.tmp / "logs").mkdir()
         self.procs: dict[str, subprocess.Popen] = {}
         self._logs: list[Any] = []
@@ -425,8 +425,8 @@ class Client:
         return resp
 
     def ws(self, path: str):
-        token = self.http.cookies.get("ca_session") or ""
-        return websockets.connect(f"ws://127.0.0.1:{self.cfg.api_port}{path}", additional_headers={"Cookie": f"ca_session={token}"},
+        token = self.http.cookies.get("ofa_session") or ""
+        return websockets.connect(f"ws://127.0.0.1:{self.cfg.api_port}{path}", additional_headers={"Cookie": f"ofa_session={token}"},
                                   open_timeout=15, max_size=2**22)
 
     async def close(self) -> None:
@@ -702,7 +702,7 @@ class LoadTest:
                     self.tasks.append(asyncio.create_task(answer(item, delay), name=f"answer-{item['id'][:8]}"))
             try:
                 await asyncio.wait_for(wake.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             wake.clear()
 
@@ -862,8 +862,8 @@ class LoadTest:
                     except httpx.HTTPError:
                         continue
                     self.last_metrics[name] = body
-                    row[f"{name}_ctx"] = metric_value(body, "centralign_browser_contexts_active")
-                    row[f"{name}_runs"] = metric_value(body, "centralign_runs_active")
+                    row[f"{name}_ctx"] = metric_value(body, "oneforall_browser_contexts_active")
+                    row[f"{name}_runs"] = metric_value(body, "oneforall_runs_active")
                 try:
                     async with self.sm() as session:
                         row["queued"], row["active"] = (await session.execute(text(
@@ -1028,20 +1028,20 @@ class LoadTest:
         """Counters from the workers' last successful /metrics scrape (a killed worker contributes its last scrape)."""
         bodies = list(self.last_metrics.values())
         total = lambda name, **labels: sum(metric_sum(b, name, **labels) for b in bodies)  # noqa: E731
-        return {"scraped": len(bodies), "leases_lost": int(total("centralign_worker_leases_lost_total")),
-                "requeued_worker_lost": int(total("centralign_runs_requeued_total", reason="worker_lost")),
-                "requeued_shutdown": int(total("centralign_runs_requeued_total", reason="shutdown")),
-                "resumed": int(total("centralign_runs_resumed_total")), "browser_relaunches": int(total("centralign_browser_relaunches_total")),
-                "tool_calls": int(total("centralign_tool_calls_total")), "tool_calls_failed": int(total("centralign_tool_calls_total", ok="false"))}
+        return {"scraped": len(bodies), "leases_lost": int(total("oneforall_worker_leases_lost_total")),
+                "requeued_worker_lost": int(total("oneforall_runs_requeued_total", reason="worker_lost")),
+                "requeued_shutdown": int(total("oneforall_runs_requeued_total", reason="shutdown")),
+                "resumed": int(total("oneforall_runs_resumed_total")), "browser_relaunches": int(total("oneforall_browser_relaunches_total")),
+                "tool_calls": int(total("oneforall_tool_calls_total")), "tool_calls_failed": int(total("oneforall_tool_calls_total", ok="false"))}
 
     def llm_metrics(self) -> dict:
         buckets: dict[float, float] = defaultdict(float)
         total = count = 0.0
         for body in self.last_metrics.values():
-            for le, value in metric_buckets(body, "centralign_llm_ratelimit_wait_seconds"):
+            for le, value in metric_buckets(body, "oneforall_llm_ratelimit_wait_seconds"):
                 buckets[le] += value
-            total += metric_value(body, "centralign_llm_ratelimit_wait_seconds_sum")
-            count += metric_value(body, "centralign_llm_ratelimit_wait_seconds_count")
+            total += metric_value(body, "oneforall_llm_ratelimit_wait_seconds_sum")
+            count += metric_value(body, "oneforall_llm_ratelimit_wait_seconds_count")
         return {"limiter_wait_s": {"n": int(count), "mean": round(total / count, 3) if count else None,
                                    "p50": rounded(histogram_percentile(list(buckets.items()), 50), 3),
                                    "p95": rounded(histogram_percentile(list(buckets.items()), 95), 3)}}

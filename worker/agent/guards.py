@@ -14,8 +14,9 @@ import math
 import re
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Literal
 
 from worker.agent.policy import INTERNAL_TOOLS
 from worker.agent.state import NON_FAULT_ERRORS, Step

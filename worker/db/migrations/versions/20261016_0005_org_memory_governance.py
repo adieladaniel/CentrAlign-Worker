@@ -12,15 +12,15 @@ Revision ID: 0005_memory
 Revises: 0004_usage
 Create Date: 2026-10-16
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
 
 revision: str = '0005_memory'
-down_revision: Union[str, None] = '0004_usage'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = '0004_usage'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:

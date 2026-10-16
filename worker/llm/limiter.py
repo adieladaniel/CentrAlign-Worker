@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert

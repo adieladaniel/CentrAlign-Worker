@@ -26,7 +26,14 @@ from worker.agent.verifier import Verifier
 from worker.config import Settings
 from worker.llm.base import Message, ToolCall
 from worker.llm.policy import (
-    ERP_NOTE_KEY, PolicyLLM, is_verifier, parse_facts, parse_page, parse_task, plain_amount, same_amount,
+    ERP_NOTE_KEY,
+    PolicyLLM,
+    is_verifier,
+    parse_facts,
+    parse_page,
+    parse_task,
+    plain_amount,
+    same_amount,
 )
 from worker.store import FileRunStore
 from worker.tools.browser import BrowserSession, close_browser

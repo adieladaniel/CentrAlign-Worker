@@ -192,7 +192,7 @@ async def test_release_closes_only_that_context(tmp_path, registry, browser_pool
         await close_browser(a)
         assert "browser" not in a.extras
         assert browser_pool.active_contexts == base + 1
-        with pytest.raises(Exception):  # the context is really closed
+        with pytest.raises(Exception):  # noqa: B017 - Playwright raises its own Error type; any failure proves the context is closed
             await context_a.new_page()
         assert browser_pool.browser_alive(True)  # the shared Chromium keeps running
         assert (await call(registry, b, "browser_read_page")).ok  # B is unaffected

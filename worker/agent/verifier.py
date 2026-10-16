@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Awaitable, Callable
 
 from worker.agent.prompts import VERIFIER_NO_TOOL_NUDGE, VERIFIER_SYSTEM_PROMPT
 from worker.agent.state import truncate

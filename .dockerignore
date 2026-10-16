@@ -39,3 +39,10 @@ playwright-report/
 tests/
 pytest.ini
 docs/
+
+# CI / tooling
+.github/
+.gitleaks.toml
+constraints.txt
+requirements-dev.txt
+pyproject.toml

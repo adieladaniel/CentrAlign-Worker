@@ -8,7 +8,7 @@ A pure ASGI middleware (it also sees WebSockets and does not buffer responses). 
   cannot blow up the label cardinality; requests that match no route share the label ``unmatched``;
 * writes one log line (``GET /api/runs -> 200 in 12 ms``; health checks and /metrics only at DEBUG).
 
-For WebSockets it keeps the ``centralign_ws_connections`` gauge (from accept to close) and binds a request id.
+For WebSockets it keeps the ``oneforall_ws_connections`` gauge (from accept to close) and binds a request id.
 Add it last in ``create_app`` so it is the outermost layer and also sees what the other middleware rejects.
 """
 from __future__ import annotations

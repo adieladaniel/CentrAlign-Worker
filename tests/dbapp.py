@@ -2,7 +2,7 @@
 over ``httpx.ASGITransport`` (the asyncpg pool must stay on the test's own event loop, which TestClient's thread would
 break), a WebSocket driver for ASGI apps, and a scripted LLM that walks a run through approvals.
 
-Everything runs against the ``centralign_test`` database with a scripted LLM, a tiny browser-less tool registry and no
+Everything runs against the ``oneforall_test`` database with a scripted LLM, a tiny browser-less tool registry and no
 simulated company (a fake tenant id and entry token stand in for a provisioned environment).
 """
 from __future__ import annotations
@@ -426,7 +426,7 @@ async def ws_connect(app, path: str, cookie: str | None = None, headers: dict[st
     task = asyncio.ensure_future(app(scope, receive, send))
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass  # a live run keeps the socket open; what arrived so far is the result
     finally:
         task.cancel()
@@ -435,7 +435,7 @@ async def ws_connect(app, path: str, cookie: str | None = None, headers: dict[st
 
 
 def session_cookie(client: httpx.AsyncClient) -> str:
-    return "ca_session=" + client.cookies["ca_session"]
+    return "ofa_session=" + client.cookies["ofa_session"]
 
 
 async def audit_actions(sm: async_sessionmaker[AsyncSession], org_id: uuid.UUID | None = None) -> list[str]:

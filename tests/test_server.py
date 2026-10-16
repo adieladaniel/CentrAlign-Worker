@@ -4,7 +4,6 @@ from __future__ import annotations
 import itertools
 import json
 import time
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient

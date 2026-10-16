@@ -21,9 +21,10 @@ import base64
 import html
 import json
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 from urllib.parse import quote, quote_plus
 
 from worker.agent.state import Fact, RunState, Step

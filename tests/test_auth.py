@@ -1,5 +1,5 @@
 """Multi-user authentication: sign-in, sessions, throttling, roles, approval rights and separation of duties, quotas, the
-admin API and the audit trail. Database mode against ``centralign_test``; the app is driven over ``httpx.ASGITransport``
+admin API and the audit trail. Database mode against ``oneforall_test``; the app is driven over ``httpx.ASGITransport``
 (see ``tests/dbapp.py``). The v1 file mode is covered by the existing server tests."""
 from __future__ import annotations
 
@@ -7,17 +7,29 @@ import asyncio
 import hashlib
 from datetime import datetime, timedelta, timezone
 
-import pytest
+from dbapp import (
+    ENTRY_TOKENS,
+    ERP_PASSWORDS,
+    MULTI_EMAIL,
+    PASSWORD,
+    audit_actions,
+    call,
+    finished,
+    new_client,
+    pending_request,
+    reply,
+    runner_of,
+    sign_in,
+    start_run,
+    wire_script,
+    write_script,
+)
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
-from dbapp import (
-    ENTRY_TOKENS, ERP_PASSWORDS, MULTI_EMAIL, PASSWORD, audit_actions, call, finished, make_settings, new_client,
-    pending_request, reply, runner_of, sign_in, start_run, wait_until, wire_script, write_script,
-)
 from worker import auth as auth_module
 from worker.config import Settings
-from worker.db.models import AuditLog, AuthSession, Membership, Org, User
+from worker.db.models import AuditLog, AuthSession, Org, User
 from worker.server import create_app
 
 LOGIN = "/api/auth/login"
@@ -58,9 +70,9 @@ async def test_login_opens_a_server_side_session_stored_only_as_a_hash(world, db
     assert me["org"]["policy"]["separation_of_duties"] is True and me["org"]["environment_ready"] is True
 
     cookie = resp.headers["set-cookie"]
-    assert cookie.startswith("ca_session=") and "HttpOnly" in cookie and "samesite=lax" in cookie.lower()
+    assert cookie.startswith("ofa_session=") and "HttpOnly" in cookie and "samesite=lax" in cookie.lower()
     assert "secure" not in cookie.lower()
-    token = client.cookies["ca_session"]
+    token = client.cookies["ofa_session"]
     assert len(token) >= 40
     [row] = await sessions_of(world)
     assert row.id == hashlib.sha256(token.encode()).hexdigest() and row.id != token  # only the hash is stored
@@ -153,13 +165,13 @@ async def test_a_successful_login_resets_the_email_counter(world, db_app):
 async def test_logout_revokes_the_session_on_the_server(world, db_app):
     app, _ = db_app()
     client = await sign_in(app, "operator@acme.test")
-    stolen = client.cookies["ca_session"]
+    stolen = client.cookies["ofa_session"]
     assert (await client.get("/api/runs")).status_code == 200
 
     out = await client.post("/api/auth/logout")
-    assert out.status_code == 200 and "ca_session" in out.headers["set-cookie"] and "max-age=0" in out.headers["set-cookie"].lower()
+    assert out.status_code == 200 and "ofa_session" in out.headers["set-cookie"] and "max-age=0" in out.headers["set-cookie"].lower()
     replay = new_client(app)
-    replay.cookies.set("ca_session", stolen)  # a copied cookie is worthless after logout
+    replay.cookies.set("ofa_session", stolen)  # a copied cookie is worthless after logout
     assert (await replay.get("/api/runs")).status_code == 401
     [row] = await sessions_of(world)
     assert row.revoked_at is not None
@@ -193,7 +205,7 @@ async def test_revoked_deactivated_and_orphaned_sessions_stop_working(world, db_
         await session.execute(User.__table__.update().where(User.email == "viewer@acme.test").values(is_active=False))
     assert (await client.get("/api/runs")).status_code == 401
     bad_cookie = new_client(app)
-    bad_cookie.cookies.set("ca_session", "x" * 300)
+    bad_cookie.cookies.set("ofa_session", "x" * 300)
     assert (await bad_cookie.get("/api/runs")).status_code == 401
 
 
@@ -604,7 +616,7 @@ async def test_org_settings_are_validated_and_audited(world, db_app):
     admin = await sign_in(app, "admin@acme.test")
     current = (await admin.get("/api/admin/settings")).json()["settings"]
     assert {"approval_mode": "confirm_writes", "separation_of_duties": True, "sod_for_writes": False,
-            "operators_can_approve": False, "approval_timeout_s": 3600, "max_runs_per_day": 50, "max_steps": 40,
+            "operators_can_approve": False, "approval_timeout_s": 3600, "max_runs_per_day": 50, "max_steps": 60,
             "run_timeout_s": 900}.items() <= current.items()  # settings added by later milestones are checked in their own tests
     assert (current["max_tokens_per_day"], current["max_llm_calls_per_day"], current["gemini_models"]) == (2_000_000, 500, [])
     ok = await admin.put("/api/admin/settings", json={"approval_mode": "confirm_all", "max_steps": 25, "operators_can_approve": True})
@@ -627,7 +639,7 @@ async def test_org_settings_are_validated_and_audited(world, db_app):
 
     async with world.sm() as session:
         rows = (await session.scalars(select(AuditLog).where(AuditLog.action == "org.settings_update").order_by(AuditLog.id))).all()
-    assert len(rows) == 1 and rows[0].details["changed"]["max_steps"] == [40, 25]  # only real changes are recorded
+    assert len(rows) == 1 and rows[0].details["changed"]["max_steps"] == [60, 25]  # only real changes are recorded
 
 
 async def test_credentials_api_never_returns_values_and_keeps_blank_secrets(world, db_app):

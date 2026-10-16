@@ -17,8 +17,22 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
-    BigInteger, Boolean, CheckConstraint, Computed, DateTime, Float, ForeignKey, Identity, Index, Integer, LargeBinary,
-    MetaData, String, Text, func, text,
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Computed,
+    DateTime,
+    Float,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    LargeBinary,
+    MetaData,
+    String,
+    Text,
+    func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column

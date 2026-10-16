@@ -16,14 +16,15 @@ import asyncio
 import inspect
 import re
 import uuid
-from typing import Any, Awaitable, Callable, Literal
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from worker.auth import ROLE_ORDER, AuthService, OrgContext, rank_of, require_db_role
+from worker.auth import AuthService, OrgContext, rank_of, require_db_role
 from worker.config import Settings
 from worker.db.models import AuditLog, Membership, Org, User
 from worker.db.seed import generate_password, hash_password
@@ -67,7 +68,7 @@ def build_admin_router(
     service: AuthService,
     get_vault: Callable[[], Vault],
     settings: Settings,
-    is_busy: Callable[[uuid.UUID], "bool | Awaitable[bool]"],
+    is_busy: Callable[[uuid.UUID], bool | Awaitable[bool]],
     sim_client: Callable[[], httpx.AsyncClient | None] = lambda: None,
 ) -> APIRouter:
     """The admin router. ``get_vault()`` opens the vault on first use. ``is_busy(org_id)`` says whether the org has a

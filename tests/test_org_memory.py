@@ -12,8 +12,21 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from dbapp import (
-    ERP_PASSWORDS, Gates, Planner, audit_actions, blocked, call, event_types, kill_worker, new_worker, registry_with, reply,
-    run_row, sign_in, start_run, wait_until,
+    ERP_PASSWORDS,
+    Gates,
+    Planner,
+    audit_actions,
+    blocked,
+    call,
+    event_types,
+    kill_worker,
+    new_worker,
+    registry_with,
+    reply,
+    run_row,
+    sign_in,
+    start_run,
+    wait_until,
 )
 from sqlalchemy import text
 
@@ -22,7 +35,13 @@ from worker.agent.memory import WorkingMemory
 from worker.agent.state import Fact, RunState
 from worker.config import Settings
 from worker.memory_store import (
-    MAX_CANDIDATES_PER_RUN, MAX_CONTENT_CHARS, Candidate, OrgMemoryStore, commit_run_memory, looks_like_task_data, screen,
+    MAX_CANDIDATES_PER_RUN,
+    MAX_CONTENT_CHARS,
+    Candidate,
+    OrgMemoryStore,
+    commit_run_memory,
+    looks_like_task_data,
+    screen,
 )
 from worker.org_settings import effective, validate_update
 from worker.store_pg import PgRunStore

@@ -6,9 +6,10 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from worker import metrics
 from worker.agent.broker import InteractionBroker
@@ -37,7 +38,7 @@ from worker.agent.state import (
 from worker.agent.thoughts import THOUGHT_LIMIT, clean_thought
 from worker.agent.verifier import Verdict, Verifier
 from worker.config import Settings
-from worker.llm.base import LLMClient, LLMError, LLMResponse, QuotaExceededError, ToolCall
+from worker.llm.base import LLMClient, LLMError, LLMResponse, QuotaExceededError
 from worker.logging_setup import clear_run_redactor, log_context, register_run_redactor
 from worker.redaction import RedactingStore, Redactor
 from worker.store import FileRunStore, RunStore

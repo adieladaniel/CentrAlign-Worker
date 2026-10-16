@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
+from typing import Any
 
 import asyncpg
 from sqlalchemy import URL
@@ -107,7 +108,7 @@ class PgListener:
         self._task = asyncio.create_task(self._run(), name=f"pg-listen-{self.name}")
         try:
             await asyncio.wait_for(self._connected.wait(), wait_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("%s: the database is not reachable yet; will keep trying", self.name)
 
     async def stop(self) -> None:
@@ -143,7 +144,7 @@ class PgListener:
             try:
                 conn = await asyncpg.connect(self._dsn, timeout=10)
                 try:
-                    conn.add_termination_listener(lambda _c: closed.set())
+                    conn.add_termination_listener(lambda _c, event=closed: event.set())  # bind this iteration's event
                     for channel in self.channels:
                         await conn.add_listener(channel, self._on_notify)
                 except BaseException:
@@ -159,7 +160,7 @@ class PgListener:
                 while not closed.is_set():
                     try:
                         await asyncio.wait_for(closed.wait(), self.keepalive_s)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         await asyncio.wait_for(conn.execute("select 1"), 10)  # a silently dead connection raises here
             except asyncio.CancelledError:
                 raise

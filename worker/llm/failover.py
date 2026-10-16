@@ -19,8 +19,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Literal
+from typing import Literal
 
 from worker.llm.base import (
     LLMClient,

@@ -10,7 +10,7 @@ tables in [loadtest-results.md](loadtest-results.md)); both are written by [`scr
  simulated people (asyncio, real HTTP logins + WebSockets)
    operators ──POST /api/runs──┐   approvers ──/api/approvals + stream, respond──┐   viewers ──run pages, event streams, probes──┐
                                 ▼                                                 ▼                                              ▼
-                       API process (uvicorn, port 8601) ─────────────── PostgreSQL 18 (database centralign_load, dropped afterwards)
+                       API process (uvicorn, port 8601) ─────────────── PostgreSQL 18 (database oneforall_load, dropped afterwards)
                                                                           ▲  job queue (SKIP LOCKED + leases), approvals, events, usage, memory
                        worker 1 ... worker N (python -m worker.jobs --concurrency K, metrics on 9601+)
                          └─ one Chromium each, one isolated browser context per run
@@ -184,7 +184,12 @@ orgs' runs kept flowing.
    `tests/test_policy_llm.py::test_the_worker_recovers_when_the_auditor_cannot_see_the_portal`. The platform behaves as designed,
    but with a real model the same sequence is likely, and a deployment should either rely on that second audit round
    (`MAX_VERIFY_ROUNDS = 2`) or make the runner re-establish sessions after a resume.
-3. `worker/db/bootstrap.py` now also allows dropping the throwaway `centralign_load*` databases (the test database
+   **Fixed in the platform since:** the read-only verifier can now sign in (it may fill vault credentials into a login form and click
+   "Sign in", which is classified READ, and nothing else), and its prompt tells it to. After a resume the first audit passes without
+   the second-round workaround, which remains only as a fallback. Regression test:
+   `tests/test_policy_llm.py::test_the_auditor_signs_in_when_its_browser_is_fresh_and_passes_the_first_round`. The numbers on this page
+   are unchanged; they were measured before this fix, with the workaround in place.
+3. `worker/db/bootstrap.py` now also allows dropping the throwaway `oneforall_load*` databases (the test database
    allow-list is otherwise unchanged).
 
 Things that were checked and held: no cross-org leak in about 118,000 scanned responses and frames and 7,900 probes, no duplicate or stray bill in
@@ -202,7 +207,7 @@ concurrency cap, quotas not exceeded, approvals surviving an API restart, runs s
   own small budget (one per API copy and per worker) and keep `DB_POOL_SIZE` per process small.
 * **Object storage for artifacts** (screenshots, downloads, reports): today they live in the worker's local `RUNS_DIR`, so a
   resumed run on another machine loses its earlier files and the API can only serve what is on its own disk. Use the
-  `ArtifactStore` seam with GCS/S3 and serve by signed URL.
+  `artifact_dir` / `artifact_file` methods of the `RunStore` seam (there is no separate `ArtifactStore` class yet) with GCS/S3 and serve by signed URL.
 * **The model quota** is the first wall in production: use a paid key, an org-level key per customer (supported through the
   vault) and per-org budgets; raise `LLM_REFILL_PER_S` only to the provider's real limit.
 * **Move the rate-limit bucket** off a single PostgreSQL row (Redis, or one bucket per key and per worker share) beyond a few
@@ -228,4 +233,4 @@ concurrency cap, quotas not exceeded, approvals surviving an API restart, runs s
 * Short tests cannot prove the absence of slow leaks (see "Memory over time").
 
 Reproduce: `python scripts/loadtest.py --orgs 3 --users 4 --runs 30 --workers 2 --concurrency 4` (about 100 s; it creates and drops its
-own `centralign_load` database, uses ports 8601 and 8602 and 9601+, and stops everything it started by PID, also on Ctrl+C).
+own `oneforall_load` database, uses ports 8601 and 8602 and 9601+, and stops everything it started by PID, also on Ctrl+C).

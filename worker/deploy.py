@@ -20,8 +20,8 @@ from starlette.background import BackgroundTask
 
 from worker.config import Settings
 
-AUTH_COOKIE = "ca_auth"
-SESSION_COOKIE = "ca_session"  # the multi-user session cookie (worker/auth.py): never forwarded to the sim
+AUTH_COOKIE = "ofa_auth"
+SESSION_COOKIE = "ofa_session"  # the multi-user session cookie (worker/auth.py): never forwarded to the sim
 AUTH_MAX_AGE_S = 7 * 24 * 3600
 # Paths reachable without a session (health checks for the platform, the login flow itself). /metrics checks its own
 # credentials (metrics token or a signed-in session), see worker/system_api.py.
@@ -106,7 +106,7 @@ class AccessControl:
 
     def __init__(self, password: str, secret: str = "") -> None:
         self.password = password
-        self._serializer = URLSafeTimedSerializer(secret or secrets.token_hex(32), salt="centralign-access")
+        self._serializer = URLSafeTimedSerializer(secret or secrets.token_hex(32), salt="oneforall-access")
         self._failures: dict[str, list[float]] = {}
         self._all_failures: list[float] = []
 
@@ -184,8 +184,8 @@ def login_page(next_url: str, error: str = "", status_code: int = 200) -> HTMLRe
     err = f'<div class="err" role="alert">{html.escape(error)}</div>' if error else ""
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in - CentrAlign Worker</title><style>{LOGIN_CSS}</style></head>
-<body><header class="topbar"><span class="logo" aria-hidden="true"></span><span class="brand">CentrAlign Worker</span><span class="sub">autonomous task agent</span></header>
+<title>Sign in - OneForAll Agent</title><style>{LOGIN_CSS}</style></head>
+<body><header class="topbar"><span class="logo" aria-hidden="true"></span><span class="brand">OneForAll Agent</span><span class="sub">autonomous task agent</span></header>
 <main><form class="card" method="post" action="/login">
 <h1>Private demo</h1><p>Enter the access password to open the live demo.</p>{err}
 <input type="hidden" name="next" value="{html.escape(next_url, quote=True)}">

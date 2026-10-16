@@ -28,9 +28,10 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Literal
 
 from sqlalchemy import and_, func, literal_column, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert

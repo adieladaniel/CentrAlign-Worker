@@ -10,13 +10,24 @@ import uuid
 from collections import Counter
 
 from dbapp import (
-    Gates, Planner, blocked, call, event_types, finished, kill_worker, new_worker, registry_with, reply, run_row,
-    sign_in, start_run, wait_until,
+    Gates,
+    Planner,
+    blocked,
+    call,
+    event_types,
+    finished,
+    kill_worker,
+    new_worker,
+    registry_with,
+    reply,
+    run_row,
+    sign_in,
+    start_run,
+    wait_until,
 )
 from sqlalchemy import text
 
 from worker import jobqueue, metrics
-
 from worker.agent.prompts import RESUME_NOTE
 from worker.llm.fake import ScriptedLLM
 from worker.store_pg import PgRunStore
@@ -267,7 +278,7 @@ async def test_a_heartbeat_that_lands_just_after_the_run_ended_is_not_a_lost_lea
         committed.append(state.run_id)
 
     monkeypatch.setattr("worker.jobs.commit_run_memory", slow_commit)
-    lost_before = metrics.sample("centralign_worker_leases_lost_total")
+    lost_before = metrics.sample("oneforall_worker_leases_lost_total")
     app, _ = db_app(**fast(JOB_LEASE_S=0.6))
     app.state.llm_factory = script_for([blocked()])
     operator = await sign_in(app, "operator@acme.test", worker=False)
@@ -277,7 +288,7 @@ async def test_a_heartbeat_that_lands_just_after_the_run_ended_is_not_a_lost_lea
 
     await until_run(world.sm, run_id, status="needs_attention", lease_owner=None)  # finished AND the lease was released
     assert committed == [run_id]  # the memory commit ran to the end instead of being cancelled
-    assert not worker.recent[run_id].lost and metrics.sample("centralign_worker_leases_lost_total") == lost_before
+    assert not worker.recent[run_id].lost and metrics.sample("oneforall_worker_leases_lost_total") == lost_before
 
 
 async def test_heartbeat_distinguishes_a_finished_run_from_a_lost_lease(world, db_app):

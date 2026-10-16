@@ -13,9 +13,9 @@ agent that reports ``succeeded`` while the ground truth disagrees is flagged.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import date
-from typing import Callable
 
 from evals.simstate import latest_invoice
 

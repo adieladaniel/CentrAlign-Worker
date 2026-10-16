@@ -1,4 +1,4 @@
-# CentrAlign Worker: live demo image (single public port, host-agnostic: Cloud Run, Codespaces, any container host).
+# OneForAll Agent: live demo image (single public port, host-agnostic: Cloud Run, Codespaces, any container host).
 #
 # Base: Microsoft's official Playwright image. The tag MUST match the `playwright` Python package version, because the
 # package drives the exact Chromium revision bundled in the image (here Playwright 1.63.0 on Ubuntu 24.04 "noble").

@@ -1,4 +1,4 @@
-/* CentrAlign Worker dashboard, multi-user mode only: the approvals inbox.
+/* OneForAll Agent dashboard, multi-user mode only: the approvals inbox.
  * Loaded after app.js and admin.js; uses their helpers ($, h, api, toast, S, showView, loadRun, riskTag, kvTable,
  * contextBlock). All text goes through textContent / text nodes (see h()).
  *

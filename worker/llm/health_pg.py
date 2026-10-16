@@ -23,15 +23,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Callable
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.db.models import ModelHealth as ModelHealthRow
-from worker.llm.failover import UNAVAILABLE_COOLDOWN_S, ModelHealth, next_quota_reset
+from worker.llm.failover import UNAVAILABLE_COOLDOWN_S, ModelHealth
 
 log = logging.getLogger(__name__)
 

@@ -1,7 +1,8 @@
 """Deterministic scripted LLM for tests."""
 from __future__ import annotations
 
-from typing import Callable, Literal
+from collections.abc import Callable
+from typing import Literal
 
 from worker.llm.base import LLMClient, LLMResponse, Message, ToolSpec
 

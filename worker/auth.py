@@ -4,7 +4,7 @@ Design
 ------
 * **Sign-in** is e-mail + password (argon2). The password check always runs, also for unknown or deactivated accounts
   (against a dummy hash), so the response and its timing do not reveal whether an e-mail exists.
-* **Sessions** are server-side rows in ``auth_sessions``. The cookie ``ca_session`` carries a random 256-bit token
+* **Sessions** are server-side rows in ``auth_sessions``. The cookie ``ofa_session`` carries a random 256-bit token
   (HttpOnly, SameSite=Lax, Secure in DEPLOY_MODE); only its SHA-256 hash is stored, so a database leak cannot be replayed.
   The idle timeout slides (``SESSION_IDLE_TTL_HOURS``, extended at most once a minute), the absolute limit does not
   (``SESSION_ABSOLUTE_TTL_DAYS``). Logging out, switching to a deactivated org or deactivating a user revokes sessions.
@@ -27,9 +27,10 @@ import logging
 import math
 import secrets
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket
@@ -47,7 +48,7 @@ from worker.org_settings import can_approve, effective, policy_view
 
 log = logging.getLogger("worker.auth")
 
-SESSION_COOKIE = "ca_session"
+SESSION_COOKIE = "ofa_session"
 ROLE_ORDER = ("viewer", "approver", "operator", "admin", "owner")
 RANK = {role: rank for rank, role in enumerate(ROLE_ORDER)}
 TOUCH_INTERVAL = timedelta(seconds=60)  # the sliding expiry is extended at most this often

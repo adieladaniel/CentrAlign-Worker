@@ -21,11 +21,12 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -42,14 +43,24 @@ from worker.agent.runner import AgentRunner
 from worker.agent.state import utcnow
 from worker.agent.toolset import build_registry
 from worker.auth import (
-    SESSION_COOKIE, CsrfGuard, AuthService, OrgContext, SessionGate, build_auth_router, require_role,
+    SESSION_COOKIE,
+    AuthService,
+    CsrfGuard,
+    OrgContext,
+    SessionGate,
+    build_auth_router,
+    require_role,
 )
 from worker.config import Settings, get_settings
 from worker.db import migrate
 from worker.db.models import Org
 from worker.db.session import dispose_engine, get_sessionmaker
 from worker.deploy import (
-    PROXY_PREFIXES, AccessControl, DailyRunCap, install_access_control, install_sim_proxy,
+    PROXY_PREFIXES,
+    AccessControl,
+    DailyRunCap,
+    install_access_control,
+    install_sim_proxy,
 )
 from worker.event_log import synthesize_events
 from worker.live import EventHub
@@ -57,8 +68,8 @@ from worker.llm.base import LLMClient, LLMError
 from worker.llm.factory import exhausted_models, make_llm
 from worker.llm.failover import active_model
 from worker.logging_setup import setup_if_unconfigured, setup_logging
-from worker.observability import ObservabilityMiddleware
 from worker.memory_api import build_memory_router
+from worker.observability import ObservabilityMiddleware
 from worker.org_settings import effective
 from worker.pg_listen import dsn_of
 from worker.provisioning import ProvisioningError, load_org_environment, org_chaos
@@ -253,7 +264,7 @@ def create_app(
         except Exception:  # noqa: BLE001 - shutdown must not raise
             log.exception("shutting down the browser pool failed")
 
-    app = FastAPI(title="CentrAlign Worker", version="2.0", lifespan=lifespan)
+    app = FastAPI(title="OneForAll Agent", version="2.0", lifespan=lifespan)
     app.state.llm_factory = llm_factory or make_llm
     app.state.registry_factory = registry_factory or build_registry
     app.state.settings = base_settings

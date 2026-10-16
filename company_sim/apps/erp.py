@@ -128,7 +128,7 @@ def create_bill(clean: dict) -> int:
     except sqlite3.IntegrityError:
         existing = db.query_one(
             "SELECT id FROM bills WHERE vendor_id = ? AND invoice_number = ?", (clean["vendor_id"], clean["invoice_number"]))
-        raise DuplicateBill(existing["id"] if existing else 0)
+        raise DuplicateBill(existing["id"] if existing else 0) from None
 
 
 # --------------------------------------------------------------------------- HTML UI

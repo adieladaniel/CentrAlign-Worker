@@ -1,6 +1,6 @@
 """Shared pytest fixtures.
 
-PostgreSQL tests use a throwaway database, ``centralign_test``, on the server named by ``DATABASE_URL`` (from the
+PostgreSQL tests use a throwaway database, ``oneforall_test``, on the server named by ``DATABASE_URL`` (from the
 environment or ``.env``): it is dropped and recreated, migrated once per pytest session, emptied between tests and
 dropped at the end. Without a reachable server the tests that need it are skipped, never failed.
 """
@@ -26,8 +26,8 @@ from worker.store import FileRunStore
 from worker.store_pg import PgRunStore
 from worker.tools.browser_pool import BrowserPool
 
-# CENTRALIGN_TEST_DB=centralign_test_<suffix> lets two pytest runs (e.g. two developers or agents) use separate databases.
-TEST_DATABASE = os.environ.get("CENTRALIGN_TEST_DB", "centralign_test")
+# ONEFORALL_TEST_DB=oneforall_test_<suffix> lets two pytest runs (e.g. two developers or agents) use separate databases.
+TEST_DATABASE = os.environ.get("ONEFORALL_TEST_DB", "oneforall_test")
 # Fixtures that bind a test to the session event loop: Playwright objects and asyncpg pools belong to the loop that
 # made them (see ``pytest_collection_modifyitems``).
 SESSION_LOOP_FIXTURES = ("browser_pool", "pg_engine", "store_kind")
@@ -62,7 +62,7 @@ def database_url_for_tests():
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def pg_engine():
-    """An engine on a fresh, migrated ``centralign_test`` database; None when PostgreSQL is not available."""
+    """An engine on a fresh, migrated ``oneforall_test`` database; None when PostgreSQL is not available."""
     url = database_url_for_tests()
     if url is None:
         yield None

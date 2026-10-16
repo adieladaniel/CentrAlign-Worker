@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 
 from . import tenants
 

@@ -1,6 +1,6 @@
 # Multi-user mode: operating guide
 
-How to set up, use and operate CentrAlign Worker with PostgreSQL: organizations, roles, the approvals inbox, credentials, quotas, the queue and the worker processes. For the design see [ARCHITECTURE.md](ARCHITECTURE.md); for measured behaviour see [SCALING.md](SCALING.md); the [README](../README.md) has the short setup.
+How to set up, use and operate OneForAll Agent with PostgreSQL: organizations, roles, the approvals inbox, credentials, quotas, the queue and the worker processes. For the design see [ARCHITECTURE.md](ARCHITECTURE.md); for measured behaviour see [SCALING.md](SCALING.md); the [README](../README.md) has the short setup.
 
 Contents: [1 What runs where](#1-what-runs-where) | [2 Setup details](#2-setup-details) | [3 People and roles](#3-people-and-roles) | [4 Organization settings](#4-organization-settings) | [5 Approvals](#5-approvals) | [6 Credentials and the environment](#6-credentials-and-the-environment) | [7 Runs, the queue and quotas](#7-runs-the-queue-and-quotas) | [8 Memory and usage](#8-memory-and-usage) | [9 Operating the processes](#9-operating-the-processes) | [10 HTTP API](#10-http-api)
 
@@ -25,7 +25,7 @@ python run.py --workers 2
 python scripts/bootstrap.py --provision-sim                       # while the simulator runs; safe to repeat
 ```
 
-- `bootstrap` connects to the `postgres` maintenance database to create the database named in `DATABASE_URL`, runs the Alembic migrations and creates the demo organizations: **Acme Corp** with `owner@`, `admin@`, `operator@`, `approver@`, `viewer@acme.test`, and **Globex** with `operator@` and `approver@globex.test`. Without `--demo-password` a random password is generated and shown once, when the users are created; re-running never changes existing passwords. `--reset` drops and recreates the `centralign` database after a confirmation (only `centralign` and `centralign_test` can be reset).
+- `bootstrap` connects to the `postgres` maintenance database to create the database named in `DATABASE_URL`, runs the Alembic migrations and creates the demo organizations: **Acme Corp** with `owner@`, `admin@`, `operator@`, `approver@`, `viewer@acme.test`, and **Globex** with `operator@` and `approver@globex.test`. Without `--demo-password` a random password is generated and shown once, when the users are created; re-running never changes existing passwords. `--reset` drops and recreates the `oneforall` database after a confirmation (only `oneforall` and `oneforall_test` can be reset).
 - `--provision-sim` creates each demo org's simulated company through the simulator's admin API and stores the logins in the vault. If the simulator is down it prints a note and skips. Any org admin can do the same later under **Admin > Provision environment**; a run cannot start in an org that has no environment (HTTP 409).
 - **Vault key.** Credentials are encrypted with `VAULT_KEY`. Without it a development key is generated into `.vault/.vault_key`; the API and every worker must see the same key (the same checkout, or the same `VAULT_KEY`). With `DEPLOY_MODE` on, the key is mandatory. `python -m worker.vault generate-key` prints a new one.
 - `python -m worker.db check` shows the masked URL, the server version and the migration state; `python -m worker.db migrate` applies pending migrations. The API logs an error at start if the schema is behind the code.
@@ -61,7 +61,7 @@ Edited under **Admin > Organization settings** (`PUT /api/admin/settings`, admin
 | `approval_timeout_s` | 3600 | 30 to 604,800 | an unanswered approval expires after this long and the run ends `needs_attention` |
 | `max_runs_per_day` | 50 | 0 to 100,000 (0 = unlimited) | runs queued per UTC day, counted when a run is queued and including cancelled ones |
 | `max_concurrent_runs` | 2 | 1 to 50 | runs of the org executing at once; the others wait in the queue |
-| `max_steps` | the deployment's `MAX_STEPS` (40) | 1 to 500 | step budget per run |
+| `max_steps` | the deployment's `MAX_STEPS` (60) | 1 to 500 | step budget per run |
 | `run_timeout_s` | the deployment's `RUN_TIMEOUT_S` (900) | 30 to 86,400 | active-time limit per run (human waits excluded) |
 | `max_tokens_per_day` | 2,000,000 | 0 to 10 billion (0 = unlimited) | input plus output tokens per UTC day |
 | `max_llm_calls_per_day` | 500 | 0 to 10 million (0 = unlimited) | LLM calls per UTC day |
@@ -95,7 +95,7 @@ An approval (or a question to the user) is a row in `approvals`, so it survives 
 - **Queue order.** Highest priority first, then oldest. Each org is limited by `max_concurrent_runs`, enforced when a worker claims a run, so one org cannot take every slot. A queued run shows its position in its org's queue.
 - **Statuses.** `queued`, `running`, `waiting_approval`, `waiting_user`, `verifying`, then `succeeded`, `failed`, `needs_attention` or `cancelled`. `needs_attention` means the system stopped honestly: blocked, a guard fired, the model was unreachable, the audit was inconclusive, an approval expired, the budget was reached, or the worker was lost too often.
 - **Cancelling.** A queued run is cancelled at once. A running run gets a flag and a NOTIFY; its worker stops it at the next safe point, which also releases open approvals.
-- **Resume.** If a worker dies, its runs return to the queue after the lease expires (`JOB_LEASE_S`, 30 s by default) and the next claim continues from the checkpoint, in a fresh browser. A run that keeps losing its worker (`JOB_MAX_ATTEMPTS`, 3) ends `needs_attention`. The run list reports whether a run was resumed.
+- **Resume.** If a worker dies, its runs return to the queue after the lease expires (`JOB_LEASE_S`, 30 s by default) and the next claim continues from the checkpoint, in a fresh browser. The independent audit after a resume is not blind: the read-only verifier may sign in through the vault (fill a login form's credentials and click "Sign in"), and can do nothing else. A run that keeps losing its worker (`JOB_MAX_ATTEMPTS`, 3) ends `needs_attention`. The run list reports whether a run was resumed.
 - **Budgets.** Before each LLM call the org's daily token and call totals (UTC day) are compared with its limits; at the limit the run ends `needs_attention` with "Organization daily LLM budget reached ... resets at 00:00 UTC". One call may overshoot, because the check happens before the call.
 
 ## 8. Memory and usage
@@ -121,7 +121,7 @@ Roles in the table are the minimum. A foreign organization's ids always answer 4
 
 | Endpoint | Role | Purpose |
 |---|---|---|
-| `POST /api/auth/login`, `POST /api/auth/logout` | public / any | sign in (sets the `ca_session` cookie), sign out |
+| `POST /api/auth/login`, `POST /api/auth/logout` | public / any | sign in (sets the `ofa_session` cookie), sign out |
 | `GET /api/auth/me`, `POST /api/auth/switch-org` | viewer | the user, active org, all orgs, approval policy and capabilities; change the active org |
 | `GET /api/runs`, `GET /api/runs/{id}` | viewer | the org's runs (with queue position); one run with steps, plan, facts, pending approvals and report |
 | `POST /api/runs` | operator | queue a run `{task, approval_mode?, headed?}` |

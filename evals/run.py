@@ -29,9 +29,9 @@ from urllib.parse import urlparse
 
 import httpx
 
+from company_sim.seed import workspace_files
 from evals.checkers import CheckResult, classify_outcome, run_check
 from evals.scenarios import Scenario, ScenarioError, ScriptedHuman, load_scenarios
-from company_sim.seed import workspace_files
 from evals.simstate import admin_headers, build_sim_state, delete_tenant, fetch_admin_state, provision_tenant
 from worker.agent.broker import AutoBroker
 from worker.agent.runner import AgentRunner

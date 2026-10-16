@@ -1,0 +1,5 @@
+# Developer and CI tooling. The runtime dependencies (and pytest / pytest-asyncio) are in requirements.txt.
+#   pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
+ruff          # linter: ruff check .   (configured in pyproject.toml; the code base is not auto-formatted)
+pip-audit     # known-vulnerability scan of the dependencies (security workflow)
+actionlint-py # lints .github/workflows/*.yml (downloads the actionlint binary when it is installed)

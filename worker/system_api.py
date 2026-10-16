@@ -13,7 +13,7 @@
   org only (queue, runs in flight, runs finished in the last 24 hours, run-time percentiles, the workers holding their
   runs). Admins listed in ``PLATFORM_ADMIN_EMAILS`` see every org.
 
-``QueueDepthSampler`` keeps the ``centralign_queue_depth`` gauge fresh: every ``QUEUE_SAMPLE_S`` an API process counts the
+``QueueDepthSampler`` keeps the ``oneforall_queue_depth`` gauge fresh: every ``QUEUE_SAMPLE_S`` an API process counts the
 queued runs per org with one query on the partial index of the queue.
 """
 from __future__ import annotations

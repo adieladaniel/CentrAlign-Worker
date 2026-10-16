@@ -5,7 +5,7 @@ numbers and exposes them: the API on ``GET /metrics`` (protected, see ``worker/s
 ``--metrics-port`` (loopback). Scrape every process and aggregate in Prometheus; in database mode the run, tool, LLM and
 approval series live in the workers, the HTTP, WebSocket and queue-depth series in the API.
 
-Metrics (``centralign_`` prefix; histograms add ``_bucket``/``_sum``/``_count``):
+Metrics (``oneforall_`` prefix; histograms add ``_bucket``/``_sum``/``_count``):
 
 =================================  ==============================  ==============================================
 runs_total                         counter {status}                finished runs by final status
@@ -36,10 +36,17 @@ http_request_duration_seconds      histogram {route}               request time
 from __future__ import annotations
 
 import time
-from typing import Callable
+from collections.abc import Callable
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
-from prometheus_client import GC_COLLECTOR, PLATFORM_COLLECTOR, PROCESS_COLLECTOR  # noqa: F401 - re-exported for docs
+from prometheus_client import (  # noqa: F401 - re-exported for docs
+    GC_COLLECTOR,
+    PLATFORM_COLLECTOR,
+    PROCESS_COLLECTOR,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+)
 
 REGISTRY = CollectorRegistry(auto_describe=True)
 for _collector in (GC_COLLECTOR, PLATFORM_COLLECTOR, PROCESS_COLLECTOR):
@@ -55,39 +62,39 @@ OTHER_ORG = "_other"
 _SECONDS_SLOW = (1, 5, 10, 30, 60, 120, 300, 600, 900, 1800, 3600)
 _SECONDS_FAST = (0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60)
 
-RUNS = Counter("centralign_runs_total", "Finished runs by final status.", ["status"], registry=REGISTRY)
-RUN_DURATION = Histogram("centralign_run_duration_seconds", "Active time of a run (approval waits excluded).",
+RUNS = Counter("oneforall_runs_total", "Finished runs by final status.", ["status"], registry=REGISTRY)
+RUN_DURATION = Histogram("oneforall_run_duration_seconds", "Active time of a run (approval waits excluded).",
                          buckets=_SECONDS_SLOW, registry=REGISTRY)
-RUNS_ACTIVE = Gauge("centralign_runs_active", "Runs executing in this process.", registry=REGISTRY)
-QUEUE_DEPTH = Gauge("centralign_queue_depth", "Queued runs per organization (slug).", ["org"], registry=REGISTRY)
-QUEUE_WAIT = Histogram("centralign_queue_wait_seconds", "Time from queueing to the first claim by a worker.",
+RUNS_ACTIVE = Gauge("oneforall_runs_active", "Runs executing in this process.", registry=REGISTRY)
+QUEUE_DEPTH = Gauge("oneforall_queue_depth", "Queued runs per organization (slug).", ["org"], registry=REGISTRY)
+QUEUE_WAIT = Histogram("oneforall_queue_wait_seconds", "Time from queueing to the first claim by a worker.",
                        buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1800), registry=REGISTRY)
 
-TOOL_CALLS = Counter("centralign_tool_calls_total", "Tool executions.", ["tool", "ok"], registry=REGISTRY)
-TOOL_DURATION = Histogram("centralign_tool_duration_seconds", "Tool execution time (automatic retries included).",
+TOOL_CALLS = Counter("oneforall_tool_calls_total", "Tool executions.", ["tool", "ok"], registry=REGISTRY)
+TOOL_DURATION = Histogram("oneforall_tool_duration_seconds", "Tool execution time (automatic retries included).",
                           ["tool"], buckets=_SECONDS_FAST, registry=REGISTRY)
 
-LLM_CALLS = Counter("centralign_llm_calls_total", "LLM call attempts by outcome.", ["model", "outcome"], registry=REGISTRY)
-LLM_TOKENS = Counter("centralign_llm_tokens_total", "LLM tokens.", ["model", "direction"], registry=REGISTRY)
-LLM_LATENCY = Histogram("centralign_llm_latency_seconds", "Time inside the provider call.", ["model"],
+LLM_CALLS = Counter("oneforall_llm_calls_total", "LLM call attempts by outcome.", ["model", "outcome"], registry=REGISTRY)
+LLM_TOKENS = Counter("oneforall_llm_tokens_total", "LLM tokens.", ["model", "direction"], registry=REGISTRY)
+LLM_LATENCY = Histogram("oneforall_llm_latency_seconds", "Time inside the provider call.", ["model"],
                         buckets=(0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120), registry=REGISTRY)
-LLM_RATELIMIT_WAIT = Histogram("centralign_llm_ratelimit_wait_seconds", "Time spent waiting for the LLM rate limiter.",
+LLM_RATELIMIT_WAIT = Histogram("oneforall_llm_ratelimit_wait_seconds", "Time spent waiting for the LLM rate limiter.",
                                buckets=(0.001, 0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 300), registry=REGISTRY)
 
-APPROVALS = Counter("centralign_approvals_total", "Approvals and questions by outcome.", ["kind", "outcome"], registry=REGISTRY)
-APPROVAL_WAIT = Histogram("centralign_approval_wait_seconds", "Time a run waited for a human answer.",
+APPROVALS = Counter("oneforall_approvals_total", "Approvals and questions by outcome.", ["kind", "outcome"], registry=REGISTRY)
+APPROVAL_WAIT = Histogram("oneforall_approval_wait_seconds", "Time a run waited for a human answer.",
                           buckets=(1, 5, 15, 30, 60, 120, 300, 900, 1800, 3600, 14400), registry=REGISTRY)
 
-LEASES_LOST = Counter("centralign_worker_leases_lost_total", "Runs whose lease this worker lost.", registry=REGISTRY)
-REQUEUED = Counter("centralign_runs_requeued_total", "Runs put back in the queue.", ["reason"], registry=REGISTRY)
-RESUMED = Counter("centralign_runs_resumed_total", "Runs continued from a checkpoint.", registry=REGISTRY)
+LEASES_LOST = Counter("oneforall_worker_leases_lost_total", "Runs whose lease this worker lost.", registry=REGISTRY)
+REQUEUED = Counter("oneforall_runs_requeued_total", "Runs put back in the queue.", ["reason"], registry=REGISTRY)
+RESUMED = Counter("oneforall_runs_resumed_total", "Runs continued from a checkpoint.", registry=REGISTRY)
 
-BROWSER_CONTEXTS = Gauge("centralign_browser_contexts_active", "Open isolated browser contexts.", registry=REGISTRY)
-BROWSER_RELAUNCHES = Counter("centralign_browser_relaunches_total", "Chromium relaunches after a crash.", registry=REGISTRY)
+BROWSER_CONTEXTS = Gauge("oneforall_browser_contexts_active", "Open isolated browser contexts.", registry=REGISTRY)
+BROWSER_RELAUNCHES = Counter("oneforall_browser_relaunches_total", "Chromium relaunches after a crash.", registry=REGISTRY)
 
-WS_CONNECTIONS = Gauge("centralign_ws_connections", "Open WebSocket connections.", registry=REGISTRY)
-HTTP_REQUESTS = Counter("centralign_http_requests_total", "HTTP requests.", ["route", "method", "status"], registry=REGISTRY)
-HTTP_DURATION = Histogram("centralign_http_request_duration_seconds", "HTTP request time.", ["route"],
+WS_CONNECTIONS = Gauge("oneforall_ws_connections", "Open WebSocket connections.", registry=REGISTRY)
+HTTP_REQUESTS = Counter("oneforall_http_requests_total", "HTTP requests.", ["route", "method", "status"], registry=REGISTRY)
+HTTP_DURATION = Histogram("oneforall_http_request_duration_seconds", "HTTP request time.", ["route"],
                           buckets=(0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30), registry=REGISTRY)
 
 for _status in FINAL_STATUSES:  # series exist from the start, so rate() works before the first run

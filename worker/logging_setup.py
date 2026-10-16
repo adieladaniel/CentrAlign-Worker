@@ -25,9 +25,10 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Iterator, Mapping
+from typing import Any
 from urllib.parse import quote
 
 CONTEXT_FIELDS = ("run_id", "org_id", "user_id", "worker_id", "request_id")
@@ -169,7 +170,7 @@ class RedactionFilter(logging.Filter):
 
 
 _filter = RedactionFilter()
-_factory_marker = "_centralign_factory"
+_factory_marker = "_oneforall_factory"
 
 
 def install_record_factory() -> None:
@@ -232,7 +233,7 @@ class TextFormatter(logging.Formatter):
 
 # --------------------------------------------------------------------------- setup
 
-_HANDLER_NAME = "centralign"
+_HANDLER_NAME = "oneforall"
 
 
 def resolve_format(settings: Any) -> str:

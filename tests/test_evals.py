@@ -17,7 +17,12 @@ from company_sim import chaos, config, state
 from evals import run as eval_run
 from evals import simstate
 from evals.checkers import (
-    CHECKERS, MONTHS, CheckResult, classify_outcome, date_variants, mentions_date, run_check,
+    CHECKERS,
+    MONTHS,
+    classify_outcome,
+    date_variants,
+    mentions_date,
+    run_check,
 )
 from evals.scenarios import SCENARIOS_DIR, Scenario, ScenarioError, ScriptedHuman, load_scenarios, parse_scenario
 from evals.simstate import build_sim_state, latest_invoice

@@ -22,7 +22,7 @@ runs/
 company_sim/data/
 
 # Eval output: per-run JSON and logs are ignored. evals/results/latest.md is kept on purpose
-# so reviewers can read the last results table without running anything.
+# so the last results table can be read without running anything.
 evals/results/*
 !evals/results/latest.md
 !evals/results/.gitkeep

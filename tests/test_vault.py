@@ -7,7 +7,6 @@ import json
 import logging
 import re
 import threading
-from functools import partial
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -31,7 +30,7 @@ from worker.tools.browser import ClickTool, close_browser
 from worker.tools.browser_pool import POOL_KEY
 from worker.tools.http import HttpRequestTool
 from worker.tools.retry import execute_with_retry
-from worker.tools.secrets import FillSecretTool, ListCredentialsTool
+from worker.tools.secrets import ListCredentialsTool
 from worker.vault import (
     Credential,
     FileVaultBackend,
@@ -40,8 +39,10 @@ from worker.vault import (
     VaultScope,
     default_scope,
     generate_key,
-    main as vault_main,
     open_vault,
+)
+from worker.vault import (
+    main as vault_main,
 )
 
 PASSWORD = "S3cret!pw#42 &x"

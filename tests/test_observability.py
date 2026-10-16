@@ -17,8 +17,18 @@ from pathlib import Path
 import httpx
 import pytest
 from dbapp import (
-    Gates, Planner, blocked, call, finished, make_settings, new_client, registry_with, reply, sign_in, start_run,
-    wait_until, ws_connect,
+    Gates,
+    Planner,
+    blocked,
+    call,
+    finished,
+    make_settings,
+    new_client,
+    registry_with,
+    reply,
+    sign_in,
+    start_run,
+    ws_connect,
 )
 from fastapi import Depends
 from sqlalchemy import text
@@ -33,7 +43,13 @@ from worker.llm.base import LLMResponse, ToolCall, Usage
 from worker.llm.fake import ScriptedLLM
 from worker.llm.resilient import ResilientLLM
 from worker.logging_setup import (
-    clear_secrets, current_context, log_context, redact_text, register_run_redactor, register_secret, setup_logging,
+    clear_secrets,
+    current_context,
+    log_context,
+    redact_text,
+    register_run_redactor,
+    register_secret,
+    setup_logging,
 )
 from worker.observability import ObservabilityMiddleware
 from worker.redaction import Redactor
@@ -45,7 +61,7 @@ from worker.tools.registry import ToolRegistry
 from worker.vault import Credential, VaultScope
 
 DB_PASSWORD = "Sup3rS3cret!pw"
-DB_URL = f"postgresql+asyncpg://postgres:{DB_PASSWORD}@localhost:5432/centralign"
+DB_URL = f"postgresql+asyncpg://postgres:{DB_PASSWORD}@localhost:5432/oneforall"
 ERP_PASSWORD = "acme-erp-secret-81"  # the ERP login of the acme test org (tests/dbapp.py)
 
 
@@ -198,7 +214,7 @@ def test_secrets_never_reach_a_log_handler_or_caplog(logs, caplog):
     log.error("cannot connect to %s", DB_URL)  # the password comes in as an argument
     log.error(f"asyncpg failed for {DB_URL}")  # ... and pre-formatted
     log.info("headers %s", {"X-API-Key": "k-12345-abcdef", "Authorization": "Bearer abc.def.ghi-123456", "x": "ok"})
-    log.info("Cookie: ca_session=SESSIONTOKEN123; theme=dark")
+    log.info("Cookie: ofa_session=SESSIONTOKEN123; theme=dark")
     log.info("sending Authorization: Bearer tok-9f8e7d6c5b4a and password=hunter2hunter2 and key %s", key)
     log.info("scraper used scrape-token-xyz")
     try:
@@ -209,7 +225,7 @@ def test_secrets_never_reach_a_log_handler_or_caplog(logs, caplog):
         for secret in (DB_PASSWORD, "k-12345-abcdef", "abc.def.ghi-123456", "SESSIONTOKEN123", "tok-9f8e7d6c5b4a",
                        "hunter2hunter2", key, "scrape-token-xyz"):
             assert secret not in text_, secret
-    assert "postgresql+asyncpg://postgres:[REDACTED]@localhost:5432/centralign" in buf.getvalue()
+    assert "postgresql+asyncpg://postgres:[REDACTED]@localhost:5432/oneforall" in buf.getvalue()
     assert "ok" in buf.getvalue()  # harmless values survive
     exc_lines = [line for line in json_lines(buf) if line["msg"] == "boom"]
     assert "RuntimeError" in exc_lines[0]["exc"] and DB_PASSWORD not in exc_lines[0]["exc"]
@@ -262,38 +278,38 @@ async def test_a_runs_vault_secrets_are_masked_in_logs_only_while_it_runs(logs, 
 async def test_a_scripted_run_produces_the_expected_metrics(tmp_path):
     llm = ResilientLLM(ScriptedLLM([
         say(tc("echo")), say(tc("boom")), say(tc("save")), finish_blocked()]), min_interval_s=0.0)
-    tools = [("centralign_tool_calls_total", {"tool": "echo", "ok": "true"}),
-             ("centralign_tool_calls_total", {"tool": "boom", "ok": "false"}),
-             ("centralign_tool_calls_total", {"tool": "save", "ok": "true"}),
-             ("centralign_tool_duration_seconds_count", {"tool": "echo"}),
-             ("centralign_runs_total", {"status": "needs_attention"}),
-             ("centralign_run_duration_seconds_count", {}),
-             ("centralign_llm_calls_total", {"model": "fake", "outcome": "ok"}),
-             ("centralign_llm_tokens_total", {"model": "fake", "direction": "input"}),
-             ("centralign_llm_tokens_total", {"model": "fake", "direction": "output"}),
-             ("centralign_llm_latency_seconds_count", {"model": "fake"}),
-             ("centralign_llm_ratelimit_wait_seconds_count", {}),
-             ("centralign_approvals_total", {"kind": "approval", "outcome": "approved"}),
-             ("centralign_approval_wait_seconds_count", {})]
+    tools = [("oneforall_tool_calls_total", {"tool": "echo", "ok": "true"}),
+             ("oneforall_tool_calls_total", {"tool": "boom", "ok": "false"}),
+             ("oneforall_tool_calls_total", {"tool": "save", "ok": "true"}),
+             ("oneforall_tool_duration_seconds_count", {"tool": "echo"}),
+             ("oneforall_runs_total", {"status": "needs_attention"}),
+             ("oneforall_run_duration_seconds_count", {}),
+             ("oneforall_llm_calls_total", {"model": "fake", "outcome": "ok"}),
+             ("oneforall_llm_tokens_total", {"model": "fake", "direction": "input"}),
+             ("oneforall_llm_tokens_total", {"model": "fake", "direction": "output"}),
+             ("oneforall_llm_latency_seconds_count", {"model": "fake"}),
+             ("oneforall_llm_ratelimit_wait_seconds_count", {}),
+             ("oneforall_approvals_total", {"kind": "approval", "outcome": "approved"}),
+             ("oneforall_approval_wait_seconds_count", {})]
     watch = Delta(*tools)
-    active_before = counter("centralign_runs_active")
+    active_before = counter("oneforall_runs_active")
 
     runner = AgentRunner("metrics please", llm, small_registry(None), file_settings(tmp_path), AutoBroker.approve_all())
     state = await runner.run()
 
     assert state.status == "needs_attention"
     assert watch.grew() == [1, 1, 1, 1, 1, 1, 4, 40, 20, 4, 4, 1, 1]
-    assert counter("centralign_runs_active") == active_before  # the gauge went up and came back down
+    assert counter("oneforall_runs_active") == active_before  # the gauge went up and came back down
 
 
 async def test_denied_answered_and_expired_approvals_get_their_own_outcome(tmp_path):
-    denied = Delta(("centralign_approvals_total", {"kind": "approval", "outcome": "denied"}))
+    denied = Delta(("oneforall_approvals_total", {"kind": "approval", "outcome": "denied"}))
     deny = AutoBroker(lambda kind, payload: {"approved": False})
     await AgentRunner("deny", ScriptedLLM([say(tc("save")), finish_blocked()]), small_registry(None),
                       file_settings(tmp_path), deny).run()
     assert denied.grew() == [1]
 
-    answered = Delta(("centralign_approvals_total", {"kind": "question", "outcome": "answered"}))
+    answered = Delta(("oneforall_approvals_total", {"kind": "question", "outcome": "answered"}))
     asker = AutoBroker(lambda kind, payload: {"answer": "go on"})
     registry = small_registry(None)
     from worker.tools.interaction import AskUserTool
@@ -308,7 +324,7 @@ async def test_denied_answered_and_expired_approvals_get_their_own_outcome(tmp_p
             self.last_expired, self.no_response_reason = True, "approval expired after 1 min"
             return None
 
-    expired = Delta(("centralign_approvals_total", {"kind": "approval", "outcome": "expired"}))
+    expired = Delta(("oneforall_approvals_total", {"kind": "approval", "outcome": "expired"}))
     state = await AgentRunner("expire", ScriptedLLM([say(tc("save"))]), small_registry(None), file_settings(tmp_path),
                               Silent()).run()
     assert state.status == "needs_attention" and expired.grew() == [1]
@@ -328,9 +344,9 @@ async def test_a_run_that_fails_to_use_the_llm_counts_the_error(tmp_path):
                 raise LLMError("broken")
             return await super().complete(*args, **kwargs)
 
-    watch = Delta(("centralign_llm_calls_total", {"model": "fake", "outcome": "rate_limited"}),
-                  ("centralign_llm_calls_total", {"model": "fake", "outcome": "error"}),
-                  ("centralign_llm_calls_total", {"model": "fake", "outcome": "ok"}))
+    watch = Delta(("oneforall_llm_calls_total", {"model": "fake", "outcome": "rate_limited"}),
+                  ("oneforall_llm_calls_total", {"model": "fake", "outcome": "error"}),
+                  ("oneforall_llm_calls_total", {"model": "fake", "outcome": "ok"}))
     llm = ResilientLLM(Flaky([finish_blocked()]), min_interval_s=0.0, base_delay_s=0.0, max_delay_s=0.0)
     with pytest.raises(LLMError):
         await llm.complete([], [])  # attempt 1: rate limited, retried; attempt 2: a hard error
@@ -340,7 +356,7 @@ async def test_a_run_that_fails_to_use_the_llm_counts_the_error(tmp_path):
 def test_run_observer_excludes_human_waiting_from_the_duration():
     clock = iter([0.0, 10.0, 70.0, 100.0])  # begin, wait start, wait end, finish
     observer = metrics.RunObserver(lambda: next(clock))
-    watch = Delta(("centralign_run_duration_seconds_sum", {}), ("centralign_run_duration_seconds_count", {}))
+    watch = Delta(("oneforall_run_duration_seconds_sum", {}), ("oneforall_run_duration_seconds_count", {}))
     observer.begin()
     observer.wait_started()
     assert observer.wait_ended() == 60.0
@@ -373,12 +389,12 @@ def test_a_worker_can_serve_its_metrics_on_loopback():
         body = httpx.get(f"http://127.0.0.1:{port}/metrics", timeout=5).text
     finally:
         stop()
-    assert "centralign_runs_total" in body and "centralign_http_requests_total" in body
+    assert "oneforall_runs_total" in body and "oneforall_http_requests_total" in body
 
 
 async def test_browser_pool_reports_contexts_and_relaunches(browser_pool):
-    contexts = Delta(("centralign_browser_contexts_active", {}))
-    relaunches = Delta(("centralign_browser_relaunches_total", {}))
+    contexts = Delta(("oneforall_browser_contexts_active", {}))
+    relaunches = Delta(("oneforall_browser_relaunches_total", {}))
     context = await browser_pool.acquire_context()
     assert contexts.grew() == [1]
     browser = context.browser
@@ -410,10 +426,10 @@ async def test_request_id_is_echoed_or_generated_and_bad_ones_are_replaced(tmp_p
 async def test_http_metrics_use_route_templates_not_raw_paths(tmp_path):
     client = await file_app_client(tmp_path)
     ids = [uuid.uuid4().hex for _ in range(3)]
-    watch = Delta(("centralign_http_requests_total", {"route": "/api/runs/{run_id}", "method": "GET", "status": "404"}),
-                  ("centralign_http_request_duration_seconds_count", {"route": "/api/runs/{run_id}"}),
-                  ("centralign_http_requests_total", {"route": "unmatched", "method": "GET", "status": "404"}),
-                  ("centralign_http_requests_total", {"route": "/api/health", "method": "GET", "status": "200"}))
+    watch = Delta(("oneforall_http_requests_total", {"route": "/api/runs/{run_id}", "method": "GET", "status": "404"}),
+                  ("oneforall_http_request_duration_seconds_count", {"route": "/api/runs/{run_id}"}),
+                  ("oneforall_http_requests_total", {"route": "unmatched", "method": "GET", "status": "404"}),
+                  ("oneforall_http_requests_total", {"route": "/api/health", "method": "GET", "status": "200"}))
     async with client:
         for run_id in ids:
             assert (await client.get(f"/api/runs/{run_id}")).status_code == 404
@@ -444,20 +460,20 @@ async def test_websocket_gauge_counts_open_connections():
     async def send(message):
         sent.append(message)
 
-    before = counter("centralign_ws_connections")
+    before = counter("oneforall_ws_connections")
     task = asyncio.create_task(app({"type": "websocket", "path": "/x", "headers": []}, receive, send))
     await asyncio.wait_for(entered.wait(), 2)
-    assert counter("centralign_ws_connections") == before + 1
+    assert counter("oneforall_ws_connections") == before + 1
     release.set()
     await asyncio.wait_for(task, 2)
-    assert counter("centralign_ws_connections") == before
+    assert counter("oneforall_ws_connections") == before
 
 
 async def test_metrics_are_open_only_in_local_development(tmp_path):
     async with await file_app_client(tmp_path) as client:  # no deploy mode, no token, no password
         response = await client.get("/metrics")
         assert response.status_code == 200 and "text/plain" in response.headers["content-type"]
-        assert "# TYPE centralign_runs_total counter" in response.text
+        assert "# TYPE oneforall_runs_total counter" in response.text
 
 
 async def test_metrics_in_deploy_mode_need_the_token(tmp_path):
@@ -466,7 +482,7 @@ async def test_metrics_in_deploy_mode_need_the_token(tmp_path):
         assert (await client.get("/metrics", headers={"Authorization": "Bearer wrong"})).status_code == 401
         assert (await client.get("/metrics", headers={"Authorization": "Basic scrape-me-123"})).status_code == 401
         good = await client.get("/metrics", headers={"Authorization": "Bearer scrape-me-123"})
-        assert good.status_code == 200 and "centralign_runs_total" in good.text
+        assert good.status_code == 200 and "oneforall_runs_total" in good.text
     async with await file_app_client(tmp_path, DEPLOY_MODE=True) as client:  # deployed, no token, no session: closed
         assert (await client.get("/metrics")).status_code == 401
         assert (await client.get("/healthz")).status_code == 200  # liveness stays public
@@ -597,8 +613,8 @@ async def test_worker_log_lines_name_the_run_org_user_and_worker_and_hide_vault_
 
 
 async def test_database_runs_feed_queue_wait_and_run_metrics(world, db_app):
-    watch = Delta(("centralign_queue_wait_seconds_count", {}), ("centralign_runs_total", {"status": "needs_attention"}),
-                  ("centralign_run_duration_seconds_count", {}))
+    watch = Delta(("oneforall_queue_wait_seconds_count", {}), ("oneforall_runs_total", {"status": "needs_attention"}),
+                  ("oneforall_run_duration_seconds_count", {}))
     app, planner = db_app()
     planner.add(reply("Nothing.", call("list_files")), blocked())
     operator = await sign_in(app, "operator@acme.test")
@@ -615,11 +631,11 @@ async def test_queue_depth_is_sampled_per_org(world, db_app):
     await start_run(globex, "three")
     assert await queue_depths(world.sm) == {"acme": 2, "globex": 1}
     assert await sample_queue_depth(world.sm) == {"acme": 2, "globex": 1}
-    assert (counter("centralign_queue_depth", org="acme"), counter("centralign_queue_depth", org="globex")) == (2, 1)
+    assert (counter("oneforall_queue_depth", org="acme"), counter("oneforall_queue_depth", org="globex")) == (2, 1)
     async with world.sm() as session, session.begin():
         await session.execute(text("update runs set status = 'cancelled' where org_id = :o"), {"o": world.org_ids["acme"]})
     await sample_queue_depth(world.sm)
-    assert (counter("centralign_queue_depth", org="acme"), counter("centralign_queue_depth", org="globex")) == (0, 1)
+    assert (counter("oneforall_queue_depth", org="acme"), counter("oneforall_queue_depth", org="globex")) == (0, 1)
 
 
 async def test_a_resumed_run_counts_the_requeue_and_the_resume(world, db_app):
@@ -632,8 +648,8 @@ async def test_a_resumed_run_counts_the_requeue_and_the_resume(world, db_app):
     app.state.llm_factory = planner
     operator = await sign_in(app, "operator@acme.test", worker=False)
     run_id = await start_run(operator, "survive")
-    watch = Delta(("centralign_runs_requeued_total", {"reason": "worker_lost"}), ("centralign_runs_resumed_total", {}),
-                  ("centralign_queue_wait_seconds_count", {}))
+    watch = Delta(("oneforall_runs_requeued_total", {"reason": "worker_lost"}), ("oneforall_runs_resumed_total", {}),
+                  ("oneforall_queue_wait_seconds_count", {}))
     doomed = new_worker(app, "w-doomed")
     await doomed.start()
     assert await gates.reached("never")
@@ -712,9 +728,9 @@ async def test_events_websocket_is_counted_and_released(world, db_app):
     operator = await sign_in(app, "operator@acme.test")
     run_id = await start_run(operator, "watch me")
     await finished(operator, run_id)
-    before = counter("centralign_ws_connections")
+    before = counter("oneforall_ws_connections")
     from dbapp import session_cookie
 
     result = await ws_connect(app, f"/api/runs/{run_id}/events", cookie=session_cookie(operator))
     assert result.accepted and "replay_done" in result.types
-    assert counter("centralign_ws_connections") == before
+    assert counter("oneforall_ws_connections") == before

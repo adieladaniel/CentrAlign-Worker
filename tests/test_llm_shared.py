@@ -1,5 +1,5 @@
 """Shared LLM limits (M7): the PostgreSQL rate limiter and model health, usage accounting, per-org budgets and keys,
-and the usage endpoints. Database tests run against ``centralign_test`` with fake LLM clients (no network)."""
+and the usage endpoints. Database tests run against ``oneforall_test`` with fake LLM clients (no network)."""
 from __future__ import annotations
 
 import asyncio
@@ -10,9 +10,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from dbapp import blocked, call, make_settings, new_client, reply, sign_in, small_registry
 from sqlalchemy import select, text
 
-from dbapp import blocked, call, make_settings, new_client, reply, sign_in, small_registry
 from worker.agent.broker import AutoBroker
 from worker.agent.runner import AgentRunner
 from worker.config import Settings

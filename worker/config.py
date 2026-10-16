@@ -49,11 +49,11 @@ class Settings(BaseSettings):
 
     # Agent policy and guards
     APPROVAL_MODE: Literal["auto", "confirm_writes", "confirm_all"] = "confirm_writes"
-    MAX_STEPS: int = 40
+    MAX_STEPS: int = 60
     MAX_CONSECUTIVE_FAILURES: int = 4
     RUN_TIMEOUT_S: int = 900
 
-    # Deployment (all opt-in; see README "Deploying a live demo"). Off by default, so local dev is unchanged.
+    # Deployment (all opt-in; see README 1.6, "hosting a demo container"). Off by default, so local dev is unchanged.
     ACCESS_PASSWORD: str = ""       # set -> every route needs a login (signed session cookie)
     SESSION_SECRET: str = ""        # signs the cookie; a random one is generated per process when empty
     DEPLOY_MODE: bool = False       # server mode: always headless, the dashboard hides the "Headed browser" switch
@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     VAULT_DIR: str = "./.vault"     # where the file-backed vault keeps vault.json
 
     # PostgreSQL (see worker/db/). Empty = v1 behaviour: file-backed runs and vault, no database.
-    DATABASE_URL: str = ""          # postgresql+asyncpg://user:password@host:5432/centralign (never logged unmasked)
+    DATABASE_URL: str = ""          # postgresql+asyncpg://user:password@host:5432/oneforall (never logged unmasked)
     DB_POOL_SIZE: int = 10          # connections kept open per process
     DB_MAX_OVERFLOW: int = 10       # extra connections allowed under load
     DB_POOL_TIMEOUT_S: float = 30.0  # how long a request waits for a free connection

@@ -1,0 +1,22 @@
+# gitleaks configuration (used by .github/workflows/security.yml).
+# Start from the default rules, then allow ONLY the fake credentials that belong to the simulated company and the test
+# suite. Nothing here is a real secret: real keys live in .env / the vault, which are git-ignored.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake simulator logins and fake keys used as test fixtures (never valid anywhere)"
+targetRules = ["generic-api-key", "gcp-api-key"]
+condition = "OR"
+paths = [
+    # The simulated company's own demo logins (mail-pass-123, portal-pass-456, ledger-pass-789, ledger-api-key-001),
+    # generated for the agent to read from the shared drive, and the default API key the simulator ships with.
+    '''^workspace/credentials\.json$''',
+    '''^company_sim/config\.py$''',
+    # Test fixtures: made-up keys and tokens used to prove that secrets are redacted/masked/isolated.
+    '''^tests/.*\.py$''',
+]
+regexes = [
+    # The same documented fake simulator key quoted in the README's simulator reference.
+    '''ledger-api-key-001''',
+]

@@ -24,9 +24,10 @@ import os
 import re
 import sys
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet, InvalidToken

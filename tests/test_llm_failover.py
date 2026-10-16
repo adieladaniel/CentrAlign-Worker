@@ -17,7 +17,6 @@ from worker.llm.base import (
     ModelUnavailableError,
     QuotaExhaustedError,
     RateLimitError,
-    ToolCall,
     ToolSpec,
     TransientLLMError,
     Usage,

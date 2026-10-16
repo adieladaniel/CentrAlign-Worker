@@ -20,8 +20,9 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy import Date, cast, func, select
 from sqlalchemy.exc import IntegrityError

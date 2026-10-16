@@ -1,0 +1,91 @@
+name: Evals (real Gemini)
+
+# Manual only: it makes real model calls and uses free-tier quota. Needs the repository secret GEMINI_API_KEY.
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Comma separated scenario ids (see: python -m evals.run --list)"
+        required: true
+        default: "invoice_happy,invoice_server_error,invoice_ambiguous_vendor,reply_payment_date,deny_write"
+      repeat:
+        description: "Runs per scenario"
+        required: true
+        default: "1"
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  evals:
+    name: Evals
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      LLM_PROVIDER: gemini
+      EVAL_SCENARIOS: ${{ inputs.scenarios }}
+      EVAL_REPEAT: ${{ inputs.repeat }}
+    steps:
+      - name: Check the secret
+        id: key
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Evals skipped::The repository secret GEMINI_API_KEY is not set. Add it under Settings > Secrets and variables > Actions and run again."
+            echo "### Evals skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "The repository secret \`GEMINI_API_KEY\` is not set, so no scenario was run." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Validate the inputs
+        if: steps.key.outputs.has_key == 'true'
+        run: |
+          [[ "$EVAL_SCENARIOS" =~ ^[a-z0-9_]+(,[a-z0-9_]+)*$ ]] || { echo "::error::scenarios must be a comma separated list of ids"; exit 1; }
+          [[ "$EVAL_REPEAT" =~ ^[1-9][0-9]?$ ]] || { echo "::error::repeat must be a number from 1 to 99"; exit 1; }
+      - uses: actions/checkout@v7
+        if: steps.key.outputs.has_key == 'true'
+      - uses: actions/setup-python@v7
+        if: steps.key.outputs.has_key == 'true'
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            constraints.txt
+      - name: Install dependencies
+        if: steps.key.outputs.has_key == 'true'
+        run: python -m pip install -r requirements.txt -c constraints.txt
+      - name: Install Chromium and its system libraries
+        if: steps.key.outputs.has_key == 'true'
+        run: python -m playwright install --with-deps chromium
+      # The harness starts the simulated company itself. The key reaches the process only through the environment and
+      # is never printed (the runner masks the secret in logs as well).
+      - name: Run the scenarios
+        if: steps.key.outputs.has_key == 'true'
+        run: python -m evals.run --only "$EVAL_SCENARIOS" --repeat "$EVAL_REPEAT"
+      - name: Show the results table
+        if: always() && steps.key.outputs.has_key == 'true'
+        run: |
+          if [ -f evals/results/latest.md ]; then
+            cat evals/results/latest.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No results file was written." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload results
+        if: always() && steps.key.outputs.has_key == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: eval-results
+          path: |
+            evals/results/latest.md
+            evals/results/*.json
+          if-no-files-found: ignore
+          retention-days: 30

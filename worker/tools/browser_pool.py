@@ -21,9 +21,8 @@ import logging
 import weakref
 from typing import Any
 
-from playwright.async_api import Browser, BrowserContext
+from playwright.async_api import Browser, BrowserContext, async_playwright
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import async_playwright
 
 from worker import metrics
 
@@ -81,7 +80,7 @@ class BrowserPool:
         """A fresh isolated context, launching (or relaunching) Chromium if needed."""
         try:
             await asyncio.wait_for(self._slots.acquire(), self.acquire_timeout_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise BrowserPoolBusy(
                 f"All {self.max_contexts} browser slots are in use (BROWSER_MAX_CONTEXTS={self.max_contexts}); "
                 f"waited {self.acquire_timeout_s:g}s. Try again when other runs finish."

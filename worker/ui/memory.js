@@ -1,4 +1,4 @@
-/* CentrAlign Worker dashboard, multi-user mode only: the organization memory page.
+/* OneForAll Agent dashboard, multi-user mode only: the organization memory page.
  * Loaded after app.js and admin.js; uses their helpers ($, h, api, toast, showView, loadRun, dataTable, fmtWhen, guarded).
  * Every member can read and search; admins can edit a note's content, scope and expiry, delete it, and expire stale
  * notes. Notes are never created here: only verified runs write them (see the note on the page). All text goes through

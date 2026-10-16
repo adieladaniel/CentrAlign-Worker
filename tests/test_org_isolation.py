@@ -1,7 +1,7 @@
 """Tenant isolation in the multi-user server: another org's runs, files, events, approvals and credentials are invisible
 (always 404, never 403), and each org gets its own simulated company, credentials and browser cookie.
 
-Database mode against ``centralign_test``; the simulated company runs in-process (``httpx.ASGITransport``) on a temporary
+Database mode against ``oneforall_test``; the simulated company runs in-process (``httpx.ASGITransport``) on a temporary
 ``DATA_DIR``, and the cookie pre-seed is checked in a real pooled Chromium against that same app served on a local port.
 """
 from __future__ import annotations
@@ -15,8 +15,18 @@ import pytest
 import pytest_asyncio
 import uvicorn
 from dbapp import (
-    ENTRY_TOKENS, ERP_PASSWORDS, call, finished, new_client, pending_request, reply, runner_of, seed_world, session_cookie,
-    shutdown_all, sign_in, start_run, write_script, ws_connect,
+    ENTRY_TOKENS,
+    ERP_PASSWORDS,
+    finished,
+    pending_request,
+    runner_of,
+    seed_world,
+    session_cookie,
+    shutdown_all,
+    sign_in,
+    start_run,
+    write_script,
+    ws_connect,
 )
 from sqlalchemy import select, text
 
@@ -30,7 +40,7 @@ from worker.tools.browser import BrowserSession
 from worker.tools.browser_pool import POOL_KEY
 from worker.tools.retry import execute_with_retry
 from worker.tools.secrets import ListCredentialsTool
-from worker.vault import Vault, generate_key
+from worker.vault import Vault
 from worker.vault_pg import PgVaultBackend
 
 UNKNOWN_RUN = "0" * 32
@@ -100,7 +110,7 @@ async def test_websocket_needs_a_session_and_the_run_must_belong_to_the_callers_
 
     anonymous = await ws_connect(app, path)
     assert not anonymous.accepted and anonymous.close_code == 1008 and anonymous.messages == []
-    forged = await ws_connect(app, path, "ca_session=" + "a" * 43)
+    forged = await ws_connect(app, path, "ofa_session=" + "a" * 43)
     assert not forged.accepted and forged.close_code == 1008
 
     own = await ws_connect(app, path, session_cookie(globex_op))
@@ -166,7 +176,7 @@ async def test_runs_get_only_their_own_orgs_credentials_and_never_see_the_entry_
         assert runner.redactor.redact(ERP_PASSWORDS[slug]) == "[REDACTED:erp.password]"
 
     llms = dict(zip(app.state.test_worker.claimed, planner.created))  # the worker creates each run's LLM when it claims it
-    for slug, other in (("acme", "globex"), ("globex", "acme")):
+    for slug, _other in (("acme", "globex"), ("globex", "acme")):
         prompt = "\n".join(m.content for m in llms[runs[slug]].calls[0]["messages"])
         assert "erp" in prompt and "secure vault" in prompt  # the agent is told which credential names exist
         for secret in (ENTRY_TOKENS["acme"], ENTRY_TOKENS["globex"], ERP_PASSWORDS["acme"], ERP_PASSWORDS["globex"], "sim_entry"):

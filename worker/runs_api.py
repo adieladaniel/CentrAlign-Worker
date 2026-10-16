@@ -13,8 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -25,10 +26,10 @@ from worker.agent.state import utcnow
 from worker.approvals_pg import ApprovalStore
 from worker.auth import AuthService, OrgContext, require_db_role, websocket_context
 from worker.config import Settings
+from worker.db.models import Org
 from worker.db.util import maybe_uuid, parse_ts
 from worker.event_log import synthesize_events
 from worker.live import EventHub
-from worker.db.models import Org
 from worker.org_settings import answer_rights, effective, stricter_mode
 from worker.redaction import Redactor
 from worker.run_context import headless_for, load_org_run_context

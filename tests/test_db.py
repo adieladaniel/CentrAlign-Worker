@@ -1,7 +1,7 @@
 """PostgreSQL layer: migrations, PgRunStore specifics (events, notify, org isolation), PgVaultBackend, full-text search
 and the bootstrap. The RunStore behaviour shared with FileRunStore is tested in test_store.py.
 
-These tests need a reachable server (``DATABASE_URL``); without one they are skipped. They use ``centralign_test``."""
+These tests need a reachable server (``DATABASE_URL``); without one they are skipped. They use ``oneforall_test``."""
 from __future__ import annotations
 
 import asyncio
@@ -43,8 +43,8 @@ def new_id() -> str:
 
 
 def test_mask_url_hides_the_password_and_normalizes_the_driver():
-    for raw in ("postgresql+asyncpg://postgres:hunter2@localhost:5432/centralign",
-                "postgresql://postgres:hunter2@localhost:5432/centralign", "postgres://postgres:hunter2@localhost/centralign"):
+    for raw in ("postgresql+asyncpg://postgres:hunter2@localhost:5432/oneforall",
+                "postgresql://postgres:hunter2@localhost:5432/oneforall", "postgres://postgres:hunter2@localhost/oneforall"):
         masked = mask_url(raw)
         assert "hunter2" not in masked and masked.startswith("postgresql+asyncpg://postgres:***@localhost")
     with pytest.raises(ValueError):
@@ -52,6 +52,7 @@ def test_mask_url_hides_the_password_and_normalizes_the_driver():
 
 
 def test_no_database_url_means_file_mode(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)  # (CI and the test database runs export it)
     assert Settings(_env_file=None).DATABASE_URL == ""
     monkeypatch.setattr("worker.db.session._engine", None)
     with pytest.raises(DatabaseNotConfigured):

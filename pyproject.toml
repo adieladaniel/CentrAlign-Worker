@@ -1,0 +1,31 @@
+# Tooling configuration only (the project is not packaged; pytest settings stay in pytest.ini).
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["runs", "company_sim/data", ".vault", "workspace"]
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: import order, B: bugbear (likely bugs), UP: pyupgrade (selected rules only).
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    # Line length is a guide, not enforced: the code base has ~3% of lines above 120 (long strings, SQL, prompts, test
+    # data) and `ruff format` is deliberately not used. `line-length` above still sets the width for import sorting.
+    "E501",
+    # zip() without strict=: the pairs are built to be the same length; adding strict= everywhere is churn.
+    "B905",
+    # pyupgrade rules that would rewrite many lines for no gain here:
+    "UP017",  # datetime.timezone.utc -> datetime.UTC
+    "UP042",  # (str, Enum) -> StrEnum changes str()/format() of the members
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency markers are meant to be called in argument defaults.
+extend-immutable-calls = [
+    "fastapi.Depends", "fastapi.Query", "fastapi.Body", "fastapi.Header", "fastapi.Cookie", "fastapi.Form",
+    "fastapi.File", "fastapi.Path", "fastapi.Security",
+    # project helpers that return Depends(...)
+    "worker.auth.require_role", "worker.auth.require_db_role",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["worker", "company_sim", "evals", "scripts", "tests", "run"]

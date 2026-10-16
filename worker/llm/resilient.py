@@ -6,7 +6,8 @@ import inspect
 import logging
 import random
 import time
-from typing import Any, Awaitable, Callable, Literal, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal, Protocol
 
 from jsonschema import Draft202012Validator
 
