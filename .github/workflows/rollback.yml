@@ -31,7 +31,7 @@ jobs:
   rollback:
     name: Roll back ${{ inputs.environment }}
     if: vars.GCP_PROJECT_ID != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: ${{ inputs.environment }}
     permissions:

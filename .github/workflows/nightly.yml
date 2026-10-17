@@ -18,7 +18,7 @@ env:
 jobs:
   loadtest:
     name: Small load test (policy LLM, PostgreSQL 18)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     services:
       postgres:

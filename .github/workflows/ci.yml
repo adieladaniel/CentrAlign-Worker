@@ -15,10 +15,12 @@ permissions:
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
+# Runners are pinned to ubuntu-24.04 (the same Ubuntu "noble" as the Docker base image) instead of ubuntu-latest, so a
+# runner image upgrade cannot change the Chromium system libraries under the tests without a deliberate edit.
 jobs:
   lint:
     name: Lint (ruff, actionlint)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -47,7 +49,7 @@ jobs:
 
   test-fast:
     name: Tests (file mode, no database)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -101,7 +103,7 @@ jobs:
   test-full:
     name: Tests (full, PostgreSQL 18)
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:
@@ -190,7 +192,7 @@ jobs:
 
   docker:
     name: Docker image builds and starts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:

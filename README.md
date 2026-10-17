@@ -1,7 +1,6 @@
 # OneForAll Agent: an autonomous AI task worker
 
 ![CI](https://github.com/adieladaniel/OneForAll-Agent/actions/workflows/ci.yml/badge.svg)
-<!-- Replace <user>/<repo> with your GitHub account and repository name once the repository exists. -->
 
 Give it a business task in plain language, for example *"Find the latest invoice from Company X, extract the amount and due date, enter it into our internal system, and tell me once it is done."* It plans the work, drives a real browser and other tools, recovers from failures, asks for approval before changing anything, checks its own result with an independent verifier, and reports with evidence.
 
@@ -386,7 +385,7 @@ Every tenant-owned table carries an `org_id`, and the run store, approval store 
 ### 4.4 The credential vault
 
 - **Encrypted at rest.** The secret fields of a credential are sealed with Fernet (`VAULT_KEY`; required when `DEPLOY_MODE` is on) into one token; the table keeps only non-secret metadata (name, kind, description, URL and host hint, field *names*) in clear. The admin credentials API and page never return values; secret fields are write-only (blank means "keep the stored one").
-- **The model never sees a secret.** It gets credential names ("credentials available: erp, portal, mail"). `browser_fill_secret(ref, credential, field)` types the value straight into a text or password `<input>` inside the worker process; the observation says `â€¢â€¢â€¢â€¢ (credential erp.password)`. Textareas are refused on purpose: a free-text box is where a prompt-injected agent would copy a secret to.
+- **The model never sees a secret.** It gets credential names ("credentials available: erp, portal, mail"). `browser_fill_secret(ref, credential, field)` types the value straight into a text or password `<input>` inside the worker process; the observation says `•••• (credential erp.password)`. Textareas are refused on purpose: a free-text box is where a prompt-injected agent would copy a secret to.
 - **Host-bound credentials.** A credential may carry a host; it is typed only into a page on that host (or a subdomain) and sent only to that host, even if the HTTP allowlist would permit others. Filling is classified read (it commits nothing); the submit click is classified and gated as usual.
 - **The read-only verifier may authenticate, nothing more.** `browser_fill_secret` is the one write-capable tool it gets (flag `verifier_allowed`), and in read-only mode it only fills the fields of a login form (all submit buttons read-classified, with a password field or a sign-in button); the host binding and redaction still apply, and every other typing, selecting or write click is refused.
 - **Hidden credentials.** The organization's tenant entry token and its own Gemini key are stored in the same vault but never listed to the agent or the credentials page.
@@ -585,7 +584,7 @@ What it covers: the simulator and its tenants; the tool framework, retry rules a
 
 ### 12.1 Continuous integration
 
-GitHub Actions workflows live in [.github/workflows/](.github/workflows). Replace `<user>/<repo>` in the badge at the top of this file after you create the repository.
+GitHub Actions workflows live in [.github/workflows/](.github/workflows).
 
 | Workflow | When | What it does |
 |---|---|---|
@@ -758,61 +757,61 @@ No agent framework (LangChain, LlamaIndex, AutoGen and similar) is used, deliber
 
 ```
 oneforall-agent/
-â”œâ”€â”€ run.py                    start simulator (:8001) + API/dashboard (:8000) [+ N workers in database mode]
-â”œâ”€â”€ requirements.txt  pytest.ini  alembic.ini  .env.example  Dockerfile  .gitignore
-â”œâ”€â”€ requirements-dev.txt  constraints.txt  pyproject.toml  .gitleaks.toml    dev tools, exact pinned versions, ruff config, secret-scan allowlist
-â”œâ”€â”€ .github/                  workflows/ (ci, security, nightly, evals, deploy, _deploy-env, rollback), scripts/ (summary helpers), dependabot.yml
-â”œâ”€â”€ scripts/
-â”‚   â”œâ”€â”€ bootstrap.py          create the database, migrate, seed demo orgs/users, --provision-sim
-â”‚   â””â”€â”€ loadtest.py           the load test (writes docs/loadtest-results.json and .md)
-â”œâ”€â”€ deploy/
-â”‚   â”œâ”€â”€ start.py              container entry point: role-based supervisor (simulator, resync, API, job workers)
-â”‚   â””â”€â”€ gcp/setup.sh          one-time Google Cloud setup (APIs, registry, service accounts, Workload Identity, secrets, budget)
-â”œâ”€â”€ company_sim/              simulated company (FastAPI + Jinja2 + SQLite), multi-tenant
-â”‚   â”œâ”€â”€ app.py  __main__.py   app wiring, `python -m company_sim`
-â”‚   â”œâ”€â”€ apps/                 mail.py  portal.py  erp.py (UI + REST API)  admin.py (chaos, reset, tenants, state)
-â”‚   â”œâ”€â”€ tenants.py            tenant registry, per-tenant db/PDF paths, provisioning
-â”‚   â”œâ”€â”€ tenant_web.py         entry route /t/<token>/, cookie and API-key tenant resolution
-â”‚   â”œâ”€â”€ seed.py  db.py        deterministic seed data, schema
-â”‚   â”œâ”€â”€ chaos.py              failure-injection flags (per tenant)
-â”‚   â”œâ”€â”€ auth.py  state.py     cookie sessions (per tenant); ground-truth queries for evals
-â”‚   â”œâ”€â”€ pdfgen.py             invoice PDFs
-â”‚   â””â”€â”€ templates/ static/    HTML for the three apps
-â”œâ”€â”€ worker/
-â”‚   â”œâ”€â”€ config.py             settings (env / .env)
-â”‚   â”œâ”€â”€ server.py             API app factory: file-mode run endpoints, wiring of the routers, scenarios, sim proxy
-â”‚   â”œâ”€â”€ auth.py               sign-in, sessions, roles, OrgContext, CSRF guard, throttling, audit
-â”‚   â”œâ”€â”€ admin_api.py          members, org settings, credentials, environment, audit
-â”‚   â”œâ”€â”€ runs_api.py           database-mode runs, respond, approvals inbox, event WebSockets
-â”‚   â”œâ”€â”€ memory_api.py  usage_api.py  system_api.py   org memory admin, usage reports, /healthz /readyz /metrics, System card
-â”‚   â”œâ”€â”€ jobqueue.py           enqueue, claim, lease, heartbeat, reap, cancel (the SQL of the queue)
-â”‚   â”œâ”€â”€ jobs.py               the worker process: `python -m worker.jobs`
-â”‚   â”œâ”€â”€ run_context.py        what starting a run needs (org settings, environment, LLM)
-â”‚   â”œâ”€â”€ approvals_pg.py       durable approval rows and their state changes
-â”‚   â”œâ”€â”€ live.py  pg_listen.py event fan-out hub; the LISTEN connection with reconnect
-â”‚   â”œâ”€â”€ store.py  store_pg.py RunStore protocol, FileRunStore; PgRunStore (org-scoped)
-â”‚   â”œâ”€â”€ event_log.py          events synthesized for runs without a log
-â”‚   â”œâ”€â”€ vault.py  vault_pg.py credential vault (Fernet), file and PostgreSQL backends; `python -m worker.vault`
-â”‚   â”œâ”€â”€ redaction.py          Redactor and RedactingStore
-â”‚   â”œâ”€â”€ provisioning.py       create/reset an org's simulated company, store its logins; `python -m worker.provisioning resync`
-â”‚   â”œâ”€â”€ org_settings.py       per-org settings, approval rights, separation of duties
-â”‚   â”œâ”€â”€ memory_store.py       organization memory: screening, write gate, recall, governance
-â”‚   â”œâ”€â”€ usage.py              usage ledger, daily budget guard, reports
-â”‚   â”œâ”€â”€ metrics.py  logging_setup.py  observability.py  health.py    Prometheus metrics, JSON logs, request middleware, readiness
-â”‚   â”œâ”€â”€ deploy.py             opt-in hosting helpers: access gate, sim proxy, daily cap
-â”‚   â”œâ”€â”€ db/                   models.py  session.py  migrate.py  bootstrap.py  seed.py  migrations/versions/ (5 revisions)
-â”‚   â”œâ”€â”€ agent/                runner.py  context.py  state.py  memory.py  policy.py  guards.py  verifier.py
-â”‚   â”‚                         report.py  broker.py  pg_broker.py  prompts.py  thoughts.py  toolset.py  cli.py
-â”‚   â”œâ”€â”€ llm/                  base.py  gemini.py  ollama.py  failover.py  resilient.py  factory.py  fake.py
-â”‚   â”‚                         limiter.py  health_pg.py  policy.py
-â”‚   â”œâ”€â”€ tools/                base.py  registry.py  retry.py  browser.py  browser_pool.py  snapshot.py/.js
-â”‚   â”‚                         files.py  http.py  secrets.py  memory_tools.py  interaction.py  control.py
-â”‚   â””â”€â”€ ui/                   index.html  app.js  admin.js  approvals.js  memory.js  styles.css (dashboard)
-â”œâ”€â”€ evals/                    scenarios/*.yaml, run.py (runner), checkers.py, scenarios.py, simstate.py, results/
-â”œâ”€â”€ tests/                    666 tests (scripted LLM, local HTML fixtures, a throwaway PostgreSQL database)
-â”œâ”€â”€ workspace/                the agent's "shared drive": credentials.json, README.txt
-â”œâ”€â”€ docs/                     ARCHITECTURE.md  MULTI_USER.md  DEPLOY.md  SCALING.md  DEMO_SCRIPT.md  loadtest-results.md/.json
-â””â”€â”€ runs/                     (generated) per-run screenshots, downloads, report.md; file-mode run logs
+├── run.py                    start simulator (:8001) + API/dashboard (:8000) [+ N workers in database mode]
+├── requirements.txt  pytest.ini  alembic.ini  .env.example  Dockerfile  .gitignore
+├── requirements-dev.txt  constraints.txt  pyproject.toml  .gitleaks.toml    dev tools, exact pinned versions, ruff config, secret-scan allowlist
+├── .github/                  workflows/ (ci, security, nightly, evals, deploy, _deploy-env, rollback), scripts/ (summary helpers), dependabot.yml
+├── scripts/
+│   ├── bootstrap.py          create the database, migrate, seed demo orgs/users, --provision-sim
+│   └── loadtest.py           the load test (writes docs/loadtest-results.json and .md)
+├── deploy/
+│   ├── start.py              container entry point: role-based supervisor (simulator, resync, API, job workers)
+│   └── gcp/setup.sh          one-time Google Cloud setup (APIs, registry, service accounts, Workload Identity, secrets, budget)
+├── company_sim/              simulated company (FastAPI + Jinja2 + SQLite), multi-tenant
+│   ├── app.py  __main__.py   app wiring, `python -m company_sim`
+│   ├── apps/                 mail.py  portal.py  erp.py (UI + REST API)  admin.py (chaos, reset, tenants, state)
+│   ├── tenants.py            tenant registry, per-tenant db/PDF paths, provisioning
+│   ├── tenant_web.py         entry route /t/<token>/, cookie and API-key tenant resolution
+│   ├── seed.py  db.py        deterministic seed data, schema
+│   ├── chaos.py              failure-injection flags (per tenant)
+│   ├── auth.py  state.py     cookie sessions (per tenant); ground-truth queries for evals
+│   ├── pdfgen.py             invoice PDFs
+│   └── templates/ static/    HTML for the three apps
+├── worker/
+│   ├── config.py             settings (env / .env)
+│   ├── server.py             API app factory: file-mode run endpoints, wiring of the routers, scenarios, sim proxy
+│   ├── auth.py               sign-in, sessions, roles, OrgContext, CSRF guard, throttling, audit
+│   ├── admin_api.py          members, org settings, credentials, environment, audit
+│   ├── runs_api.py           database-mode runs, respond, approvals inbox, event WebSockets
+│   ├── memory_api.py  usage_api.py  system_api.py   org memory admin, usage reports, /healthz /readyz /metrics, System card
+│   ├── jobqueue.py           enqueue, claim, lease, heartbeat, reap, cancel (the SQL of the queue)
+│   ├── jobs.py               the worker process: `python -m worker.jobs`
+│   ├── run_context.py        what starting a run needs (org settings, environment, LLM)
+│   ├── approvals_pg.py       durable approval rows and their state changes
+│   ├── live.py  pg_listen.py event fan-out hub; the LISTEN connection with reconnect
+│   ├── store.py  store_pg.py RunStore protocol, FileRunStore; PgRunStore (org-scoped)
+│   ├── event_log.py          events synthesized for runs without a log
+│   ├── vault.py  vault_pg.py credential vault (Fernet), file and PostgreSQL backends; `python -m worker.vault`
+│   ├── redaction.py          Redactor and RedactingStore
+│   ├── provisioning.py       create/reset an org's simulated company, store its logins; `python -m worker.provisioning resync`
+│   ├── org_settings.py       per-org settings, approval rights, separation of duties
+│   ├── memory_store.py       organization memory: screening, write gate, recall, governance
+│   ├── usage.py              usage ledger, daily budget guard, reports
+│   ├── metrics.py  logging_setup.py  observability.py  health.py    Prometheus metrics, JSON logs, request middleware, readiness
+│   ├── deploy.py             opt-in hosting helpers: access gate, sim proxy, daily cap
+│   ├── db/                   models.py  session.py  migrate.py  bootstrap.py  seed.py  migrations/versions/ (5 revisions)
+│   ├── agent/                runner.py  context.py  state.py  memory.py  policy.py  guards.py  verifier.py
+│   │                         report.py  broker.py  pg_broker.py  prompts.py  thoughts.py  toolset.py  cli.py
+│   ├── llm/                  base.py  gemini.py  ollama.py  failover.py  resilient.py  factory.py  fake.py
+│   │                         limiter.py  health_pg.py  policy.py
+│   ├── tools/                base.py  registry.py  retry.py  browser.py  browser_pool.py  snapshot.py/.js
+│   │                         files.py  http.py  secrets.py  memory_tools.py  interaction.py  control.py
+│   └── ui/                   index.html  app.js  admin.js  approvals.js  memory.js  styles.css (dashboard)
+├── evals/                    scenarios/*.yaml, run.py (runner), checkers.py, scenarios.py, simstate.py, results/
+├── tests/                    666 tests (scripted LLM, local HTML fixtures, a throwaway PostgreSQL database)
+├── workspace/                the agent's "shared drive": credentials.json, README.txt
+├── docs/                     ARCHITECTURE.md  MULTI_USER.md  DEPLOY.md  SCALING.md  DEMO_SCRIPT.md  loadtest-results.md/.json
+└── runs/                     (generated) per-run screenshots, downloads, report.md; file-mode run logs
 ```
 
 ---
