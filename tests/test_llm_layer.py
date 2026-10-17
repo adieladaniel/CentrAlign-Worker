@@ -6,7 +6,9 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 from worker.llm.base import (
+    LLMError,
     LLMResponse,
+    MalformedCallError,
     Message,
     RateLimitError,
     ToolCall,
@@ -136,8 +138,24 @@ def test_parse_response_extracts_text_calls_signatures_and_usage():
 
 def test_parse_response_malformed_function_call_is_transient():
     raw = _gemini_response([types.Part(text="")], finish="MALFORMED_FUNCTION_CALL")
-    with pytest.raises(TransientLLMError):
+    with pytest.raises(MalformedCallError) as info:
         parse_response(raw)
+    assert isinstance(info.value, TransientLLMError)
+
+
+def test_parse_response_malformed_function_call_without_content_is_still_malformed():
+    # Gemini usually sends no content at all with this finish reason; it must not become a fatal "no content" error.
+    raw = types.GenerateContentResponse(
+        candidates=[types.Candidate(content=None, finish_reason="MALFORMED_FUNCTION_CALL")])
+    with pytest.raises(MalformedCallError):
+        parse_response(raw)
+
+
+def test_parse_response_no_content_for_another_reason_stays_a_plain_error():
+    raw = types.GenerateContentResponse(candidates=[types.Candidate(content=None, finish_reason="SAFETY")])
+    with pytest.raises(LLMError) as info:
+        parse_response(raw)
+    assert not isinstance(info.value, MalformedCallError)
 
 
 def test_map_error_429_carries_retry_delay_hint():
@@ -217,6 +235,41 @@ async def test_retries_exhausted_reraises():
     with pytest.raises(RateLimitError):
         await llm.complete([Message("user", "hi")])
     assert llm.retries == 2 and llm.calls == 0
+
+
+class TemperatureProbe(FlakyLLM):
+    """FlakyLLM that remembers the temperature of every attempt."""
+
+    def __init__(self, errors, script):
+        super().__init__(errors, script)
+        self.temperatures: list[float] = []
+
+    async def complete(self, messages, tools=None, *, temperature=0.2, **kwargs):
+        self.temperatures.append(temperature)
+        return await super().complete(messages, tools, temperature=temperature, **kwargs)
+
+
+async def test_malformed_call_is_reasked_with_a_rising_temperature_and_its_own_budget():
+    inner = TemperatureProbe([MalformedCallError(), MalformedCallError()], [resp("fine")])
+    llm, sleeps = make_resilient(inner, max_retries=0)  # the ordinary retry budget is zero: malformed has its own
+    out = await llm.complete([Message("user", "hi")], temperature=0.2)
+    assert out.text == "fine" and inner.temperatures == pytest.approx([0.2, 0.5, 0.8])
+    assert llm.stats["retries"] == 2 and llm.calls == 1 and sleeps == []
+
+
+async def test_malformed_call_gives_up_after_two_reasks_and_caps_the_temperature():
+    inner = TemperatureProbe([MalformedCallError() for _ in range(10)], [])
+    llm, _ = make_resilient(inner, max_retries=5)
+    with pytest.raises(MalformedCallError):
+        await llm.complete([Message("user", "hi")], temperature=0.9)
+    assert inner.temperatures == pytest.approx([0.9, 1.0, 1.0]) and llm.retries == 2
+
+
+async def test_malformed_retries_do_not_use_up_the_other_retry_budget():
+    inner = TemperatureProbe([MalformedCallError(), RateLimitError("429"), MalformedCallError()], [resp("ok")])
+    llm, _ = make_resilient(inner, max_retries=1)
+    assert (await llm.complete([Message("user", "hi")])).text == "ok"
+    assert llm.retries == 3
 
 
 async def test_min_interval_throttle():
@@ -384,7 +437,7 @@ import socket  # noqa: E402
 
 import httpx  # noqa: E402
 
-from worker.llm.base import LLMError, is_network_error  # noqa: E402
+from worker.llm.base import is_network_error  # noqa: E402
 
 
 def dns_error() -> TransientLLMError:

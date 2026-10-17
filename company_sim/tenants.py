@@ -11,9 +11,16 @@ a private copy: its own SQLite database and invoice PDFs, login sessions, chaos 
   and credentials. The web layer sets it per request (see ``tenant_web.py``); in-process callers use ``use_tenant``.
 * A tenant id is never accepted from a client. Browsers arrive through ``/t/<token>/`` (a cookie is set) and the ERP
   REST API recognises the tenant by its API key; both are random, unguessable strings.
+* With ``SIM_TENANT_SECRET`` set they are not random but derived: HMAC-SHA256(secret, ``<tenant id>:<purpose>``), in the
+  same format and length as the random ones. Every simulator that shares the secret then creates the *same* tenant for a
+  given id, so a container that restarts (its SQLite data is ephemeral) comes back with the logins and entry token that the
+  platform's vault already holds. Without the secret nothing changes. The seed salt already defaults to the tenant id.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import re
 import secrets
@@ -227,17 +234,27 @@ def use_tenant(tenant_id: str) -> Iterator[Tenant]:
 # --------------------------------------------------------------------------- provisioning
 
 
-def _new_credentials() -> dict:
+def _secret(tenant_id: str, purpose: str, nbytes: int) -> str:
+    """A secret string like ``secrets.token_urlsafe(nbytes)``: random, or (``SIM_TENANT_SECRET`` set) derived from the
+    shared secret, the tenant id and the purpose."""
+    key = config.tenant_secret()
+    if not key:
+        return secrets.token_urlsafe(nbytes)
+    digest = hmac.new(key.encode(), f"{tenant_id}:{purpose}".encode(), hashlib.sha256).digest()[:nbytes]
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def _new_credentials(tenant_id: str) -> dict:
     default = default_tenant().credentials
     return {
-        **{app: {"username": default[app]["username"], "password": secrets.token_urlsafe(12)} for app in APPS},
-        "erp_api_key": "ledger-" + secrets.token_urlsafe(24),
+        **{app: {"username": default[app]["username"], "password": _secret(tenant_id, f"{app}-password", 12)} for app in APPS},
+        "erp_api_key": "ledger-" + _secret(tenant_id, "erp-api-key", 24),
     }
 
 
 def _new_tenant(tenant_id: str, flags: list[str], seed_salt: str) -> Tenant:
-    creds = _new_credentials()
-    return Tenant(id=tenant_id, token=secrets.token_urlsafe(24), api_key=creds["erp_api_key"], credentials=creds,
+    creds = _new_credentials(tenant_id)
+    return Tenant(id=tenant_id, token=_secret(tenant_id, "entry-token", 24), api_key=creds["erp_api_key"], credentials=creds,
                   chaos=tuple(flags), seed_salt=seed_salt, created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 

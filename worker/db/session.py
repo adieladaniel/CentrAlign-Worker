@@ -5,10 +5,12 @@
   An asyncpg pool belongs to the event loop that first used it, so a process must call ``dispose_engine`` before it
   starts another loop (the server does so on shutdown).
 * ``mask_url`` hides the password; use it for every log line and message that mentions the database.
+* ``normalize_url`` also accepts the URLs that managed hosts hand out (Neon: ``?sslmode=require&channel_binding=require``).
 """
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -18,7 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from worker.config import Settings, get_settings
 
+log = logging.getLogger("worker.db")
+
 ASYNC_DRIVER = "postgresql+asyncpg"
+_LIBPQ_ONLY_PARAMS = ("channel_binding",)  # libpq options asyncpg rejects as unknown connect arguments
+_warned_pooled: set[str] = set()
 
 
 class DatabaseNotConfigured(RuntimeError):
@@ -26,11 +32,21 @@ class DatabaseNotConfigured(RuntimeError):
 
 
 def normalize_url(url: str | URL) -> URL:
-    """Parse ``url`` and make sure it names the asyncpg driver (``postgres://`` and ``postgresql://`` are accepted)."""
+    """Parse ``url`` and make sure it names the asyncpg driver (``postgres://`` and ``postgresql://`` are accepted).
+
+    Managed hosts such as Neon give libpq-style URLs. asyncpg takes ``ssl`` where libpq says ``sslmode`` (same values:
+    ``require``, ``verify-full``, ...) and rejects ``channel_binding``, so ``sslmode`` becomes ``ssl`` (an explicit ``ssl``
+    wins) and ``channel_binding`` is dropped. Every other query parameter is kept."""
     parsed = make_url(url) if isinstance(url, str) else url
     if parsed.get_backend_name() not in ("postgresql", "postgres"):
         raise ValueError(f"DATABASE_URL must be a PostgreSQL URL, got scheme '{parsed.drivername}'")
-    return parsed.set(drivername=ASYNC_DRIVER)
+    query = dict(parsed.query)
+    sslmode = query.pop("sslmode", None)
+    if sslmode is not None and "ssl" not in query:
+        query["ssl"] = sslmode
+    for name in _LIBPQ_ONLY_PARAMS:
+        query.pop(name, None)
+    return parsed.set(drivername=ASYNC_DRIVER, query=query)
 
 
 def mask_url(url: str | URL) -> str:
@@ -54,8 +70,24 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(_strip_nul(value), ensure_ascii=False, default=str) if "\\u0000" in text else text
 
 
+def warn_if_pooled(url: str | URL) -> bool:
+    """Log one WARNING per host (masked URL only) when ``url`` points at a connection pooler such as Neon's ``-pooler``
+    endpoint: LISTEN/NOTIFY and other session features do not work through PgBouncer transaction pooling, and the
+    platform needs them. Returns True when the URL looks pooled."""
+    parsed = normalize_url(url)
+    host = parsed.host or ""
+    if "-pooler" not in host:
+        return False
+    if host not in _warned_pooled:
+        _warned_pooled.add(host)
+        log.warning("DATABASE_URL points at a pooled endpoint (%s). LISTEN/NOTIFY needs a direct connection: use the "
+                    "direct (non-pooler) host, i.e. the same host without '-pooler'.", mask_url(parsed))
+    return True
+
+
 def make_engine(url: str | URL, **options: Any) -> AsyncEngine:
     """An async engine for ``url``. ``options`` are passed to ``create_async_engine`` (pool_size, max_overflow, ...)."""
+    warn_if_pooled(url)
     return create_async_engine(normalize_url(url), json_serializer=_json_dumps, pool_pre_ping=True, **options)
 
 

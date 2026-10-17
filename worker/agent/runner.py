@@ -20,6 +20,7 @@ from worker.agent.policy import ApprovalPolicy
 from worker.agent.prompts import (
     DENIED_TEMPLATE,
     FINISH_NOT_ALONE,
+    MALFORMED_CALL_NOTE,
     NO_TOOL_NUDGE,
     RESUME_NOTE,
     SKIPPED_AFTER_FAILURE,
@@ -38,7 +39,7 @@ from worker.agent.state import (
 from worker.agent.thoughts import THOUGHT_LIMIT, clean_thought
 from worker.agent.verifier import Verdict, Verifier
 from worker.config import Settings
-from worker.llm.base import LLMClient, LLMError, LLMResponse, QuotaExceededError
+from worker.llm.base import LLMClient, LLMError, LLMResponse, MalformedCallError, QuotaExceededError
 from worker.logging_setup import clear_run_redactor, log_context, register_run_redactor
 from worker.redaction import RedactingStore, Redactor
 from worker.store import FileRunStore, RunStore
@@ -56,6 +57,7 @@ EventSink = Callable[[str, dict], Awaitable[None]]
 MAX_VERIFY_ROUNDS = 2  # feedback rounds after a failed audit; a further failed audit ends the run as failed
 MAX_TEXT_ONLY_REPLIES = 2
 EVENT_OBSERVATION_LIMIT = 2000
+ANSWER_PREFIX = "User answered: "  # how AskUserTool words a received answer (worker/tools/interaction.py)
 _RETRY_NOTE = re.compile(r"after (\d+) automatic retr")
 _STOP_WORDS = ("stop", "cancel", "abort", "quit", "give up")
 
@@ -276,6 +278,9 @@ class AgentRunner:
                 response = await self.llm.complete(messages, specs, tool_choice="any" if self._force_tool else "auto")
             except QuotaExceededError as err:  # the org's own daily budget, not a provider problem: say so plainly
                 raise _Stop("needs_attention", str(err)) from err
+            except MalformedCallError as err:  # the model's reply was unusable: a failed turn, not a dead model
+                await self._handle_malformed(err)
+                continue
             except LLMError as err:
                 raise _Stop("needs_attention", f"The language model could not be reached: {err}") from err
             await self._account(response)
@@ -292,6 +297,23 @@ class AgentRunner:
             event = self.guards.check_progress()
             if event is not None:
                 await self._apply_guard(event)
+
+    async def _handle_malformed(self, err: MalformedCallError) -> None:
+        """The model kept returning a broken tool call even after ResilientLLM's re-asks (and the other models, if any).
+
+        Record it as a failed turn, tell the model to keep its next call simple, and count it as a failure for the
+        consecutive-failure guard, so a model that can only produce broken calls still ends the run (needs_attention)."""
+        step = Step(kind="system", thought=str(err), ok=False, error="malformed_call", turn=self._turn,
+                    observation="The model's tool call was malformed and was discarded.")
+        await self._add_step(step)
+        self.guards.record(step)
+        await self._emit("llm_malformed_call", {"turn": self._turn, "message": str(err)})
+        event = self.guards.check_progress()
+        if event is not None and event.level != "nudge":
+            await self._emit("guard_triggered", {"guard": event.guard, "level": event.level, "message": event.message})
+            raise _Stop("needs_attention", "The language model kept producing malformed tool calls "
+                                           f"({event.message.rstrip('.')}); stopped with partial progress.")
+        self._nudges.append(MALFORMED_CALL_NOTE)
 
     async def _check_stop(self) -> None:
         if self._cancelled.is_set():
@@ -488,6 +510,7 @@ class AgentRunner:
         verdict = await Verifier(self.llm, self.registry).verify(
             task=self.state.task, criteria=self.state.success_criteria, claim=claim,
             facts_text=self.memory.render(), ctx=self.ctx, on_step=self._record_verify_step,
+            questions=self._asked_questions(), sources=self._audit_sources(),
         )
         self.state.usage["llm_calls"] += verdict.llm_calls
         self.state.usage["input_tokens"] += verdict.input_tokens
@@ -496,6 +519,27 @@ class AgentRunner:
         await self._emit("verification_finished", {"passed": verdict.passed, "inconclusive": verdict.inconclusive,
                                                    "checks": verdict.checks, "summary": verdict.summary})
         return verdict
+
+    def _asked_questions(self) -> list[dict]:
+        """Every question the worker put to the user, with the answer (``None`` when none came): the auditor needs it to
+        judge whether an ambiguity was settled with the user."""
+        asked = []
+        for step in self.state.steps:
+            if step.kind != "ask_user":
+                continue
+            answered = step.ok and step.observation.startswith(ANSWER_PREFIX)
+            asked.append({"question": str(step.args.get("question", "")), "options": list(step.args.get("options") or []),
+                          "answer": step.observation[len(ANSWER_PREFIX):] if answered else None})
+        return asked
+
+    def _audit_sources(self) -> str:
+        """What the auditor may look at, from what the run already knows: the start page and the vault credentials."""
+        s = self.settings
+        lines = [f"- Company intranet start page: {s.SIM_ENTRY_URL or s.SIM_BASE_URL}"]
+        if self._vault_public:
+            names = ", ".join(c["name"] + (f" ({c['description']})" if c.get("description") else "") for c in self._vault_public)
+            lines.append(f"- Credentials in the vault (usually one per system, for list_credentials + browser_fill_secret): {names}")
+        return "\n".join(lines)
 
     async def _record_verify_step(self, tool: str, args: dict, result: ToolResult, duration_ms: int) -> None:
         metrics.tool_call(tool, result.ok, duration_ms / 1000)

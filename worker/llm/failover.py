@@ -7,6 +7,7 @@ of calls, so waiting is useless: when a model reports a daily quota error the ru
 * daily quota (QuotaExhaustedError)  -> model is skipped until the next quota reset (midnight Pacific time);
 * 404 / persistent 503               -> model is skipped (until reset / for a short cooldown);
 * a single 503                       -> one quick retry on the same model first;
+* a malformed function call          -> the next model answers the same call; nothing is marked unusable;
 * connectivity errors (DNS, refused connection) never mark a model: they propagate untouched;
 * per-minute rate limits and other errors propagate to ResilientLLM (wait and retry the same model).
 
@@ -27,6 +28,7 @@ from worker.llm.base import (
     LLMClient,
     LLMError,
     LLMResponse,
+    MalformedCallError,
     Message,
     ModelUnavailableError,
     QuotaExhaustedError,
@@ -152,12 +154,18 @@ class FailoverLLM(LLMClient):
         tool_choice: Literal["auto", "any", "none"] = "auto",
     ) -> LLMResponse:
         await self.health.refresh()
+        malformed: MalformedCallError | None = None
         for model in self.models:
             if self.health.reason(model) is not None:
                 continue
             client = self._clients.get(model) or self._clients.setdefault(model, self._factory(model))
             try:
                 response = await self._attempt(client, model, messages, tools, temperature, tool_choice)
+            except MalformedCallError as err:
+                # A broken reply is a per-response glitch, not an outage: ask the next model, leave this one usable.
+                log.warning("model %s returned a malformed function call, trying the next model", model)
+                malformed = malformed or err
+                continue
             except QuotaExhaustedError as err:
                 log.warning("model %s: daily quota exhausted, failing over", model)
                 self.health.mark_exhausted(model)
@@ -174,6 +182,8 @@ class FailoverLLM(LLMClient):
                 continue
             self._note_used(model)
             return response
+        if malformed is not None:  # every usable model glitched: let ResilientLLM re-ask (the models are all still healthy)
+            raise malformed
         raise self._nothing_usable()
 
     async def _attempt(self, client, model, messages, tools, temperature, tool_choice) -> LLMResponse:

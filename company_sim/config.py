@@ -30,4 +30,10 @@ PORTAL_USER, PORTAL_PASSWORD = "acme-ap", "portal-pass-456"
 ERP_USER, ERP_PASSWORD = "ap.clerk", "ledger-pass-789"
 ERP_API_KEY = "ledger-api-key-001"
 
+def tenant_secret() -> str:
+    """``SIM_TENANT_SECRET``: when set, a tenant's entry token, API key and passwords are derived from it and the tenant id
+    (the same id gives the same secrets in every simulator that shares the secret). Read at call time; empty = random."""
+    return os.environ.get("SIM_TENANT_SECRET", "").strip()
+
+
 PAGE_SIZE = 5  # vendor portal invoices per page

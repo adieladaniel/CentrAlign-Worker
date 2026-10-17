@@ -32,7 +32,8 @@ def reply(text: str = "", *calls: ToolCall) -> LLMResponse:
 
 def verdict(passed: bool) -> LLMResponse:
     return reply("", call("submit_verdict", passed=passed, summary="audit ok",
-                          checks=[{"criterion": "File exists", "passed": passed, "observed": "saw it"}]))
+                          checks=[{"criterion": "File exists", "passed": passed, "observed": "saw it"}],
+                          ambiguity={"passed": True, "observed": "single candidate"}, completeness={"passed": True, "observed": "single candidate"}))
 
 
 def routed_llm(worker: list[LLMResponse], auditor: list[LLMResponse] = ()) -> ScriptedLLM:

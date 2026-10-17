@@ -52,9 +52,13 @@ def finish_call(status: str = "success", summary: str = "All done.") -> ToolCall
     )
 
 
+OK_CHECK = {"passed": True, "observed": "only one candidate, in the only source"}  # the mandatory verdict checks
+
+
 def verdict(passed: bool, observed: str = "looked right") -> LLMResponse:
     return reply("", call("submit_verdict", passed=passed, summary="audit summary",
-                          checks=[{"criterion": "The record is saved", "passed": passed, "observed": observed}]))
+                          checks=[{"criterion": "The record is saved", "passed": passed, "observed": observed}],
+                          ambiguity=OK_CHECK, completeness=OK_CHECK))
 
 
 def make_llm(worker, auditor=()) -> ScriptedLLM:
@@ -613,3 +617,168 @@ async def test_usage_event_reports_active_model(registry, settings):
     state = await harness.run()
     assert harness.of("usage")[0]["model"] == "gemini-3.6-flash" and harness.of("usage")[0]["model_switches"] == 1
     assert state.final_report["stats"]["model"] == "gemini-3.6-flash"
+
+
+# ---------------------------------------------------------------- malformed tool calls from the model
+
+
+async def test_malformed_call_does_not_end_the_run_the_next_turn_gets_a_corrective_note(registry, settings):
+    from worker.llm.base import MalformedCallError
+
+    queue = [MalformedCallError("Gemini produced a malformed function call"), reply("Fine now.", finish_call("failed", "x"))]
+
+    def responder(messages, tools):
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    llm = ScriptedLLM(responder)
+    h = Harness(llm, registry, settings)
+    state = await h.run()
+    first, second = llm.calls
+    assert "malformed tool call and was discarded" in second["messages"][-1].content
+    assert "malformed tool call" not in first["messages"][-1].content
+    assert state.status == "failed"  # the scripted finish decided it, not the glitch
+    assert [s.error for s in state.steps if s.kind == "system"] == ["malformed_call"]
+    assert h.of("llm_malformed_call")
+
+
+async def test_repeated_malformed_calls_trip_the_failure_guard_with_a_clear_reason(registry, settings):
+    from worker.llm.base import MalformedCallError
+
+    def always_malformed(messages, tools):
+        raise MalformedCallError("Gemini produced a malformed function call")
+
+    llm = ScriptedLLM(always_malformed)
+    h = Harness(llm, registry, settings)
+    state = await h.run()
+    assert state.status == "needs_attention"
+    summary = state.final_report["summary"]
+    assert "malformed tool calls" in summary and "could not be reached" not in summary
+    assert len(llm.calls) == settings.MAX_CONSECUTIVE_FAILURES  # bounded by the existing consecutive-failure guard
+    assert h.of("guard_triggered")[-1]["guard"] == "failures"
+
+
+async def test_a_good_turn_resets_the_malformed_streak(registry, settings):
+    from worker.llm.base import MalformedCallError
+
+    queue = [MalformedCallError(), MalformedCallError(), MalformedCallError(), reply("ok", call("read_note", topic="a")),
+             MalformedCallError(), MalformedCallError(), MalformedCallError(), reply("end", finish_call("failed", "x"))]
+
+    def responder(messages, tools):
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    state = await Harness(ScriptedLLM(responder), registry, settings).run()
+    assert state.status == "failed" and not queue  # 3 + 3 glitches never reach the limit of 4 in a row
+
+
+# ---------------------------------------------------------------- mandatory verifier checks
+
+
+def raw_verdict(**fields) -> LLMResponse:
+    base = {"passed": True, "summary": "audit summary",
+            "checks": [{"criterion": "The record is saved", "passed": True, "observed": "saw it"}]}
+    return reply("", call("submit_verdict", **{**base, **fields}))
+
+
+async def test_verdict_without_the_mandatory_checks_is_sent_back_once_then_inconclusive(registry, settings):
+    llm = make_llm(worker=[reply("Done.", finish_call())], auditor=[raw_verdict(), raw_verdict()])
+    state = await Harness(llm, registry, settings).run()
+    audits = auditor_calls(llm)
+    assert len(audits) == 2
+    reprompt = audits[1]["messages"][-1]
+    assert reprompt.role == "tool" and "ambiguity" in reprompt.content and "completeness" in reprompt.content
+    assert audits[1]["tool_choice"] == "auto" and [t.name for t in audits[1]["tools"]][-1] == "submit_verdict"
+    assert state.status == "needs_attention"
+    verification = state.final_report["verification"]
+    assert verification["inconclusive"] and not verification["passed"] and "ambiguity" in verification["summary"]
+
+
+async def test_verdict_that_adds_the_missing_checks_after_the_reprompt_is_accepted(registry, settings):
+    llm = make_llm(worker=[reply("Done.", finish_call())],
+                   auditor=[raw_verdict(), raw_verdict(ambiguity=OK_CHECK, completeness=OK_CHECK)])
+    state = await Harness(llm, registry, settings).run()
+    assert state.status == "succeeded" and len(auditor_calls(llm)) == 2
+    assert [c["criterion"] for c in state.final_report["verification"]["checks"]] == [
+        "The record is saved", "Ambiguity", "Completeness"]
+
+
+async def test_incomplete_mandatory_check_counts_as_missing(registry, settings):
+    empty = {"passed": True, "observed": "  "}
+    llm = make_llm(worker=[reply("Done.", finish_call())],
+                   auditor=[raw_verdict(ambiguity=empty, completeness=OK_CHECK)] * 2)
+    state = await Harness(llm, registry, settings).run()
+    assert state.final_report["verification"]["inconclusive"]
+
+
+async def test_failed_ambiguity_check_fails_the_verification_even_when_every_criterion_passed(registry, settings):
+    competing = {"passed": False, "observed": "Company X Holdings also has an invoice dated the same day; nobody was asked"}
+    llm = make_llm(worker=lambda m, t: reply("Claim.", finish_call()),
+                   auditor=[raw_verdict(ambiguity=competing, completeness=OK_CHECK)] * 3)
+    h = Harness(llm, registry, settings)
+    state = await h.run()
+    assert state.status == "failed"
+    checks = h.of("verification_finished")[0]["checks"]
+    assert [(c["criterion"], c["passed"]) for c in checks] == [
+        ("The record is saved", True), ("Ambiguity", False), ("Completeness", True)]
+    assert h.of("verification_finished")[0]["passed"] is False
+    feedback = worker_calls(llm)[1]["messages"][-1].content
+    assert "Ambiguity" in feedback and "Company X Holdings" in feedback
+
+
+async def test_failed_completeness_check_fails_the_verification(registry, settings):
+    missed = {"passed": False, "observed": "The mailbox holds a newer invoice the worker never looked at"}
+    llm = make_llm(worker=lambda m, t: reply("Claim.", finish_call()),
+                   auditor=[raw_verdict(ambiguity=OK_CHECK, completeness=missed)] * 3)
+    state = await Harness(llm, registry, settings).run()
+    assert state.status == "failed"
+    failed = [c for c in state.final_report["verification"]["checks"] if not c["passed"]]
+    assert [c["criterion"] for c in failed] == ["Completeness"]
+
+
+async def test_the_workers_questions_and_answers_and_the_sources_reach_the_verifier(registry, settings):
+    broker = AutoBroker(lambda kind, p: {"answer": "Holdings"})
+    llm = make_llm(
+        worker=[reply("Two matches.", call("ask_user", question="Which vendor?", options=["Ltd", "Holdings"])),
+                reply("Done.", finish_call())],
+        auditor=[verdict(True)],
+    )
+    await Harness(llm, registry, settings, broker=broker).run()
+    briefing = auditor_calls(llm)[0]["messages"][1].content
+    assert "Which vendor?" in briefing and "Ltd, Holdings" in briefing and "A: Holdings" in briefing
+    assert "SYSTEMS AND SOURCES AVAILABLE" in briefing and "start page" in briefing and "read_note" in briefing
+
+
+async def test_the_verifier_is_told_when_the_worker_asked_nothing(registry, settings):
+    llm = make_llm(worker=[reply("Done.", finish_call())], auditor=[verdict(True)])
+    await Harness(llm, registry, settings).run()
+    assert "the worker never asked the user anything" in auditor_calls(llm)[0]["messages"][1].content
+
+
+async def test_auditor_malformed_replies_are_retried_then_end_inconclusive(registry, settings):
+    from worker.llm.base import MalformedCallError
+
+    audits = {"n": 0}
+
+    def responder(messages, tools):
+        if messages[0].content.startswith(AUDITOR_PREFIX):
+            audits["n"] += 1
+            if audits["n"] == 1:
+                raise MalformedCallError()
+            return verdict(True)
+        return reply("Claim.", finish_call())
+
+    state = await Harness(ScriptedLLM(responder), registry, settings).run()
+    assert state.status == "succeeded"  # one glitch costs a step, not the audit
+
+    def always_broken(messages, tools):
+        if messages[0].content.startswith(AUDITOR_PREFIX):
+            raise MalformedCallError()
+        return reply("Claim.", finish_call())
+
+    state = await Harness(ScriptedLLM(always_broken), registry, settings).run()
+    assert state.status == "needs_attention" and "malformed tool calls" in state.final_report["verification"]["summary"]

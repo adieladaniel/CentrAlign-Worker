@@ -10,25 +10,32 @@ The simulator models a customer's *external* systems (mail, vendor portal, ERP),
   vault as the *internal* credential ``sim_entry`` (kind header). It is encrypted at rest like the logins, never listed
   to the agent or in the credentials UI (``vault.HIDDEN_CREDENTIALS``), and redacted from anything stored or sent to the
   model. The alternative, a plain field in ``orgs.settings``, would keep it unencrypted and visible to admins.
+* ``resync_org_environments`` provisions every org again; the container's start-up runs it
+  (``python -m worker.provisioning resync``), because the simulator's data lives on the container's ephemeral disk while
+  PostgreSQL and the vault outlive it: a fresh container has no tenants, but the database still names the old ones.
 * ``load_org_environment`` gives a starting run what it needs: the vault scope of the org and the cookie to pre-seed in the
   run's browser context (``ctx.extras["browser_init_cookies"]``), so the agent starts inside its own tenant and cannot
   end up in another one even if it skips the entry link.
 """
 from __future__ import annotations
 
+import argparse
+import asyncio
 import logging
 import re
+import sys
 import uuid
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from worker.config import Settings
+from worker.config import Settings, get_settings
 from worker.db.models import Org
+from worker.logging_setup import setup_logging
 from worker.vault import Vault, VaultScope
 
 log = logging.getLogger("worker.provisioning")
@@ -105,6 +112,36 @@ async def provision_org_environment(
             "credentials": ["mail", "portal", "erp", "erp_api"]}
 
 
+async def resync_org_environments(
+    sessionmaker: async_sessionmaker[AsyncSession], vault: Vault, settings: Settings, client: httpx.AsyncClient | None = None
+) -> dict[str, Any]:
+    """Provision the simulated company of **every** org (also orgs that never had one), one after the other.
+
+    Safe to run at every start: a tenant the simulator already has is kept as it is, one it lost is created again with
+    fresh logins, and the vault and ``orgs.sim_tenant_id`` are rewritten to match. A failing org is logged and skipped,
+    the others still run. Returns ``{orgs, created, existing, failed, unreachable}`` (counts only: no secrets, no names
+    of credentials); ``unreachable`` is True when any failure was a connection problem rather than a refusal."""
+    async with sessionmaker() as session:
+        orgs = (await session.scalars(select(Org).order_by(Org.slug))).all()
+    summary = {"orgs": len(orgs), "created": 0, "existing": 0, "failed": 0, "unreachable": False}
+    for org in orgs:
+        try:
+            result = await provision_org_environment(org, sessionmaker=sessionmaker, vault=vault, settings=settings, client=client)
+        except ProvisioningError as err:
+            summary["failed"] += 1
+            summary["unreachable"] = summary["unreachable"] or err.status is None
+            log.warning("could not provision the environment of org %s: %s", org.slug, err)
+            continue
+        except Exception:  # noqa: BLE001 - one org's vault or database problem must not stop the others
+            summary["failed"] += 1
+            log.exception("could not provision the environment of org %s", org.slug)
+            continue
+        summary["created" if result["created"] else "existing"] += 1
+    log.info("environments synchronized: %d org(s), %d created, %d already there, %d failed",
+             summary["orgs"], summary["created"], summary["existing"], summary["failed"])
+    return summary
+
+
 async def reset_org_environment(tenant_id: str, settings: Settings, chaos: list[str] | None = None,
                                 client: httpx.AsyncClient | None = None) -> dict[str, Any]:
     """Wipe and reseed one tenant (optionally replacing its chaos flags). Touches no other org's data."""
@@ -146,3 +183,39 @@ async def load_org_environment(org: Org, vault: Vault) -> OrgEnvironment | None:
 def vault_owner(org_id: uuid.UUID) -> str:
     """The vault owner string of an org."""
     return str(org_id)
+
+
+# --------------------------------------------------------------------------- command line
+
+
+async def _resync_command() -> int:
+    from worker.db.session import dispose_engine, get_sessionmaker
+    from worker.vault_pg import open_pg_vault
+
+    settings = get_settings()
+    if not settings.db_auth:
+        print("worker.provisioning needs database mode: set DATABASE_URL (see .env.example).", file=sys.stderr)
+        return 2
+    sessionmaker = get_sessionmaker(settings)
+    try:
+        summary = await resync_org_environments(sessionmaker, open_pg_vault(sessionmaker, settings), settings)
+    finally:
+        await dispose_engine()
+    print("resync: " + ", ".join(f"{name}={value}" for name, value in summary.items()))
+    if summary["unreachable"]:
+        print(f"error: the simulated company is not reachable at {settings.SIM_BASE_URL}", file=sys.stderr)
+        return 1
+    return 1 if summary["failed"] and summary["failed"] == summary["orgs"] else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m worker.provisioning", description="Simulated-company environments of the orgs.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("resync", help="create or refresh the environment of every org (exit 1 when the simulator is unreachable)")
+    parser.parse_args(argv)
+    setup_logging(get_settings())
+    return asyncio.run(_resync_command())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

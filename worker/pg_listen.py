@@ -43,8 +43,14 @@ ResyncHook = Callable[[], "Awaitable[None] | None"]
 
 def dsn_for(url: str | URL) -> str:
     """A plain ``postgresql://`` DSN for asyncpg from a SQLAlchemy URL or ``DATABASE_URL`` (contains the password:
-    never log it)."""
-    return normalize_url(url).set(drivername="postgresql").render_as_string(hide_password=False)
+    never log it). The SQLAlchemy URL says ``ssl=...`` (a connect argument); asyncpg's own DSN parser spells it
+    ``sslmode=...`` and would take an ``ssl`` parameter for a server setting, so it is renamed here."""
+    parsed = normalize_url(url).set(drivername="postgresql")
+    query = dict(parsed.query)
+    if "ssl" in query:
+        query["sslmode"] = query.pop("ssl")
+        parsed = parsed.set(query=query)
+    return parsed.render_as_string(hide_password=False)
 
 
 def dsn_of(sessionmaker: async_sessionmaker[AsyncSession]) -> str:

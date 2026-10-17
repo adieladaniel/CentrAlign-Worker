@@ -1,0 +1,102 @@
+name: Rollback
+
+# Send all traffic of an environment back to an earlier Cloud Run revision (a few seconds, no rebuild). Without a revision
+# name it picks the newest ready revision that is not serving now. The environment's required reviewers (if any) approve it.
+# The next successful Deploy moves traffic to its new revision again. See docs/DEPLOY.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to roll back
+        type: choice
+        options:
+          - staging
+          - production
+        required: true
+      revision:
+        description: Revision name to serve (empty = the newest ready revision that is not serving now)
+        type: string
+        required: false
+        default: ""
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: Roll back ${{ inputs.environment }}
+    if: vars.GCP_PROJECT_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+      REQUESTED: ${{ inputs.revision }}
+      CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Choose the revision
+        id: pick
+        run: |
+          if [ -z "$SERVICE" ]; then
+            echo "::error::CLOUD_RUN_SERVICE is empty for this environment (see docs/DEPLOY.md)"
+            exit 1
+          fi
+          gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format=json > service.json
+          serving=$(jq -r '[.status.traffic[]? | select((.percent // 0) > 0) | .revisionName] | join(" ")' service.json)
+          echo "Serving now: ${serving:-nothing}"
+          gcloud run revisions list --service "$SERVICE" --project "$PROJECT" --region "$REGION" --format=json > revisions.json
+          if [ -n "$REQUESTED" ]; then
+            if ! printf '%s' "$REQUESTED" | grep -Eq '^[a-z][a-z0-9-]{0,62}$'; then
+              echo "::error::'${REQUESTED}' is not a valid revision name"
+              exit 1
+            fi
+            target="$REQUESTED"
+          else
+            target=$(jq -r --arg serving "$serving" '
+              [ .[]
+                | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+                | select(($serving | split(" ")) | index(.metadata.name) | not) ]
+              | sort_by(.metadata.creationTimestamp) | reverse | .[0].metadata.name // empty' revisions.json)
+          fi
+          if [ -z "$target" ]; then
+            echo "::error::there is no earlier ready revision to roll back to"
+            exit 1
+          fi
+          if ! jq -e --arg target "$target" 'any(.[]; .metadata.name == $target and any(.status.conditions[]?; .type == "Ready" and .status == "True"))' revisions.json > /dev/null; then
+            echo "::error::revision ${target} does not exist or is not ready"
+            exit 1
+          fi
+          echo "target=${target}" >> "$GITHUB_OUTPUT"
+          echo "serving=${serving}" >> "$GITHUB_OUTPUT"
+      - name: Send all traffic to it
+        env:
+          TARGET: ${{ steps.pick.outputs.target }}
+          SERVING: ${{ steps.pick.outputs.serving }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          gcloud run services update-traffic "$SERVICE" --project "$PROJECT" --region "$REGION" --to-revisions "${TARGET}=100"
+          url=$(gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format='value(status.url)')
+          {
+            echo "### Rolled back ${ENVIRONMENT}"
+            echo
+            echo "- now serving: \`${TARGET}\` (100%)"
+            echo "- was serving: \`${SERVING:-nothing}\`"
+            echo "- URL: ${url}"
+            echo
+            echo "The next Deploy sends traffic to its new revision again."
+          } >> "$GITHUB_STEP_SUMMARY"

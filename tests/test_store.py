@@ -69,7 +69,8 @@ def finish_call() -> ToolCall:
 
 def verdict() -> LLMResponse:
     return reply("", call("submit_verdict", passed=True, summary="ok",
-                          checks=[{"criterion": "Saved", "passed": True, "observed": "saw it"}]))
+                          checks=[{"criterion": "Saved", "passed": True, "observed": "saw it"}],
+                          ambiguity={"passed": True, "observed": "single candidate"}, completeness={"passed": True, "observed": "single candidate"}))
 
 
 def scripted(clock: FakeClock, worker: list, auditor: list = (), step_s: float = 2.0) -> ScriptedLLM:

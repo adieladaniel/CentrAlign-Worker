@@ -594,7 +594,8 @@ def _scenario(sid: str) -> Scenario:
 async def test_run_scenario_flags_a_false_success(harness):
     settings, use_llm = harness
     verdict = _reply(_call("submit_verdict", passed=True, summary="Looks fine.",
-                           checks=[{"criterion": "bill exists", "passed": True, "observed": "trust me"}]))
+                           checks=[{"criterion": "bill exists", "passed": True, "observed": "trust me"}],
+                           ambiguity={"passed": True, "observed": "single candidate"}, completeness={"passed": True, "observed": "single candidate"}))
     use_llm(_routed(
         [_reply(_call("finish", status="success", summary="I entered the bill into the ERP."))], [verdict]))
     result = await eval_run.run_scenario(_scenario("invoice_happy"), settings, "http://sim.invalid")

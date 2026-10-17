@@ -1,6 +1,6 @@
 # OneForAll Agent: an autonomous AI task worker
 
-![CI](https://github.com/<user>/<repo>/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/adieladaniel/OneForAll-Agent/actions/workflows/ci.yml/badge.svg)
 <!-- Replace <user>/<repo> with your GitHub account and repository name once the repository exists. -->
 
 Give it a business task in plain language, for example *"Find the latest invoice from Company X, extract the amount and due date, enter it into our internal system, and tell me once it is done."* It plans the work, drives a real browser and other tools, recovers from failures, asks for approval before changing anything, checks its own result with an independent verifier, and reports with evidence.
@@ -34,7 +34,7 @@ It runs against a simulated company (mail inbox, vendor billing portal, internal
 19. [Reference: simulated company](#19-reference-simulated-company)
 20. [Troubleshooting](#20-troubleshooting)
 
-More detail lives in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it is built), [docs/MULTI_USER.md](docs/MULTI_USER.md) (operating the multi-user mode), [docs/SCALING.md](docs/SCALING.md) (load-test results and limits) and [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) (the recording plan).
+More detail lives in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it is built), [docs/MULTI_USER.md](docs/MULTI_USER.md) (operating the multi-user mode), [docs/DEPLOY.md](docs/DEPLOY.md) (the Cloud Run deployment), [docs/SCALING.md](docs/SCALING.md) (load-test results and limits) and [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) (the recording plan).
 
 ---
 
@@ -177,9 +177,9 @@ OLLAMA_URL=http://localhost:11434
 
 The Ollama adapter uses `/api/chat` with native tool calling behind the same interface as Gemini. Expect much weaker reliability from small models; see [decision 3.12](#312-gemini-free-tier-behind-a-provider-adapter).
 
-### 1.6 Optional: hosting a demo container
+### 1.6 Optional: hosting it on Google Cloud Run
 
-The `Dockerfile` and `deploy/start.py` build and run the v1 shape of the system in one container: the simulated company on an internal port and the worker on the single public `$PORT`, with `DEPLOY_MODE`, `PUBLIC_SIM_PROXY`, an `ACCESS_PASSWORD` gate and a daily run cap (`MAX_RUNS_PER_DAY`), all opt-in through environment variables. It is a file-mode container: `deploy/start.py` does not start `worker.jobs` processes and the image has no database, so a multi-user deployment (API, workers and a cloud PostgreSQL such as Neon) is **not done yet**; see [limitations](#14-known-limitations).
+The `Dockerfile` builds one image with two shapes. Without a `DATABASE_URL` it is the single-user demo (simulated company plus API on one public port). With one it is the multi-user deployment: `deploy/start.py` (`ROLE=all`) starts the simulator, re-creates every organization's simulated company, starts the API and a job worker, and GitHub Actions deploys it to Cloud Run with a free Neon PostgreSQL, Secret Manager, a smoke-tested traffic switch and a rollback workflow. The full runbook, including the one-time setup script and the costs, is in [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ---
 
@@ -386,7 +386,7 @@ Every tenant-owned table carries an `org_id`, and the run store, approval store 
 ### 4.4 The credential vault
 
 - **Encrypted at rest.** The secret fields of a credential are sealed with Fernet (`VAULT_KEY`; required when `DEPLOY_MODE` is on) into one token; the table keeps only non-secret metadata (name, kind, description, URL and host hint, field *names*) in clear. The admin credentials API and page never return values; secret fields are write-only (blank means "keep the stored one").
-- **The model never sees a secret.** It gets credential names ("credentials available: erp, portal, mail"). `browser_fill_secret(ref, credential, field)` types the value straight into a text or password `<input>` inside the worker process; the observation says `•••• (credential erp.password)`. Textareas are refused on purpose: a free-text box is where a prompt-injected agent would copy a secret to.
+- **The model never sees a secret.** It gets credential names ("credentials available: erp, portal, mail"). `browser_fill_secret(ref, credential, field)` types the value straight into a text or password `<input>` inside the worker process; the observation says `â€¢â€¢â€¢â€¢ (credential erp.password)`. Textareas are refused on purpose: a free-text box is where a prompt-injected agent would copy a secret to.
 - **Host-bound credentials.** A credential may carry a host; it is typed only into a page on that host (or a subdomain) and sent only to that host, even if the HTTP allowlist would permit others. Filling is classified read (it commits nothing); the submit click is classified and gated as usual.
 - **The read-only verifier may authenticate, nothing more.** `browser_fill_secret` is the one write-capable tool it gets (flag `verifier_allowed`), and in read-only mode it only fills the fields of a login form (all submit buttons read-classified, with a password field or a sign-in button); the host binding and redaction still apply, and every other typing, selecting or write click is refused.
 - **Hidden credentials.** The organization's tenant entry token and its own Gemini key are stored in the same vault but never listed to the agent or the credentials page.
@@ -573,7 +573,7 @@ The other scenarios (`invoice_duplicate`, `invoice_portal_missing`, `month_backf
 ## 12. Testing
 
 ```bash
-python -m pytest -q            # 622 tests
+python -m pytest -q            # 666 tests
 ```
 
 The count comes from `python -m pytest -q --co` (collect only). No API key and no network are needed: the model is replaced by a scripted fake (or the policy stand-in). The suite takes a few minutes because many tests start Chromium or PostgreSQL.
@@ -589,10 +589,12 @@ GitHub Actions workflows live in [.github/workflows/](.github/workflows). Replac
 
 | Workflow | When | What it does |
 |---|---|---|
-| `ci.yml` | every push, pull request, manual | **lint**: `ruff check .` and `actionlint` on the workflows. **test-fast**: the whole suite in file mode without a database (the 145 PostgreSQL tests skip by design), Chromium installed and cached, JUnit XML uploaded, pass/fail/skip counts in the job summary. **test-full** (after lint): the whole suite against a `postgres:18` service container; the job **fails if any database test was skipped**; it also runs `python -m worker.db migrate` and `check` on a scratch database. **docker**: builds the image (not pushed) and curls `/healthz` on the running container. |
+| `ci.yml` | every push, pull request, manual | **lint**: `ruff check .` and `actionlint` on the workflows. **test-fast**: the whole suite in file mode without a database (the 149 PostgreSQL tests skip by design), Chromium installed and cached, JUnit XML uploaded, pass/fail/skip counts in the job summary. **test-full** (after lint): the whole suite against a `postgres:18` service container; the job **fails if any database test was skipped**; it also runs `python -m worker.db migrate` and `check` on a scratch database. **docker**: builds the image (not pushed); starts it in the single-user shape and curls `/healthz`; then, against a `postgres:18` service, migrates and seeds with the image, starts it with `ROLE=all`, waits for `/readyz`, checks that the logs show the environment resync and the job worker, signs in as `owner@acme.test` through the real login endpoint and calls an authenticated endpoint. |
 | `security.yml` | push to `main`, pull requests, weekly | **gitleaks** over the whole git history (the CLI, so no licence key is needed; allowlist in [.gitleaks.toml](.gitleaks.toml) covers only the fake simulator and test-fixture credentials). **pip-audit** on `constraints.txt` and on a fresh resolve of `requirements.txt`; it reports in the job summary and as warnings but does not fail the build, because pip-audit cannot filter by severity. |
 | `nightly.yml` | nightly, manual | A small load test (2 orgs, 4 users each, 6 runs, 1 worker x 2 slots, policy LLM, no Gemini) against a PostgreSQL service. Fails if the ground-truth pass rate is below 100% or anything leaked between organizations. Results are uploaded and shown in the summary. |
 | `evals.yml` | manual only | Runs `python -m evals.run` against real Gemini for the scenarios and repeat count you choose (default: the five core scenarios, once). Skips with a clear message if the secret is missing. Uploads `latest.md` and the JSON. |
+| `deploy.yml` | after `ci.yml` succeeds on `main`, manual | Builds and pushes the image and deploys it to staging, then production (see 12.2). Skipped until the repository variable `GCP_PROJECT_ID` is set. |
+| `rollback.yml` | manual | Sends an environment's traffic back to an earlier Cloud Run revision. |
 | `dependabot.yml` | weekly | Grouped minor/patch update PRs for pip and for the actions. |
 
 The only secret any workflow reads is `GEMINI_API_KEY`, and only `evals.yml` does (Settings > Secrets and variables > Actions > New repository secret). The database password in the workflows is a throwaway value for a container that exists only for the job.
@@ -609,6 +611,12 @@ pip-audit -r constraints.txt --no-deps --disable-pip
 A `DATABASE_URL` in your `.env` makes the suite run the database tests too (against `oneforall_test`, never your data). To reproduce the file-mode job exactly, override it for one run: `DATABASE_URL= python -m pytest -q` (PowerShell: `$env:DATABASE_URL=""; python -m pytest -q`; an environment variable beats `.env`). To get the same result as the full job set `DATABASE_URL` to a PostgreSQL server you can create databases on and `ONEFORALL_TEST_DB` to a name starting with `oneforall_test`.
 
 Recommended branch protection for `main` (Settings > Branches > Add rule): require a pull request before merging, require status checks to pass with `Lint (ruff, actionlint)`, `Tests (file mode, no database)`, `Tests (full, PostgreSQL 18)` and `Docker image builds and starts` selected (they only appear in the list after a first run), require branches to be up to date, and block force pushes. Add `gitleaks` from the Security workflow if you want secret scanning to block merges as well.
+
+### 12.2 Continuous deployment
+
+`deploy.yml` (with the reusable `_deploy-env.yml`) deploys what CI has just verified. After `ci.yml` succeeds on a push to `main` it builds the image once, pushes it to Artifact Registry tagged with the commit and deploys the same image by digest to **staging**, then to **production** once the reviewers of the `production` GitHub Environment approve. Each environment does the same things: run the database migration as a Cloud Run job, optionally seed the demo users (`seed_demo` on a manual run), deploy the new revision with no traffic, smoke test it on its own URL (`/readyz`, `/healthz`, `/`), and only then move traffic to it. A failed smoke test leaves traffic on the previous revision. `rollback.yml` moves traffic back to an earlier revision.
+
+Google Cloud is reached through Workload Identity Federation, so no service-account key is stored in GitHub. The one-time cloud setup is `bash deploy/gcp/setup.sh`; the GitHub variables, environments and approvals are listed in [docs/DEPLOY.md](docs/DEPLOY.md). Until `GCP_PROJECT_ID` is set the deploy jobs skip themselves, so pushes stay green. The workflows were checked with `actionlint` and shellcheck, but the cloud side has not been exercised against a real project yet.
 
 ---
 
@@ -635,7 +643,7 @@ Settings come from environment variables or `.env` (names match [worker/config.p
 | | `HTTP_ALLOWED_HOSTS` | `localhost,127.0.0.1` | hosts `http_request` may call |
 | Agent | `APPROVAL_MODE` | `confirm_writes` | `auto`, `confirm_writes`, `confirm_all` (in multi-user mode the org's setting, with this as its default) |
 | | `MAX_STEPS`, `MAX_CONSECUTIVE_FAILURES`, `RUN_TIMEOUT_S` | 60, 4, 900 | guards (org settings override `MAX_STEPS` and `RUN_TIMEOUT_S`) |
-| Database | `DATABASE_URL` | empty | PostgreSQL URL; empty means single-user mode |
+| Database | `DATABASE_URL` | empty | PostgreSQL URL; empty means single-user mode. Managed-host URLs work as given (Neon's `sslmode=require&channel_binding=require` is translated); use the direct, not the `-pooler`, endpoint |
 | | `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT_S` | 10, 10, 30 | connection pool per process |
 | Auth | `AUTH_MODE` | `auto` | `auto`, `file` (ignore the database for sign-in) or `db` |
 | | `SESSION_IDLE_TTL_HOURS`, `SESSION_ABSOLUTE_TTL_DAYS` | 12, 7 | sliding and absolute session limits |
@@ -648,10 +656,16 @@ Settings come from environment variables or `.env` (names match [worker/config.p
 | Observability | `LOG_LEVEL`, `LOG_FORMAT` | `INFO`, empty | empty format means JSON in deploy mode, text otherwise |
 | | `METRICS_TOKEN`, `PLATFORM_ADMIN_EMAILS` | empty | bearer token for scrapers; admins who see every org on the System card |
 | | `QUEUE_SAMPLE_S`, `READINESS_CHECK_SIM` | 15, `true` | queue-depth gauge period; `/readyz` also checks the simulator |
+| Container (`deploy/start.py`) | `ROLE` | `all` | what the container runs: `all` (simulator, API and, with a database, the resync and job workers), `api`, `worker` or `sim` |
+| | `WORKER_PROCESSES` | 1 | job worker processes started by `ROLE=all` (database mode only) |
+| | `MIGRATE_ON_START` | off | `1` runs `python -m worker.db migrate` before the API starts (the Cloud Run pipeline migrates in a job instead) |
+| | `BOOTSTRAP_DEMO_PASSWORD` | empty | read by `scripts/bootstrap.py` when `--demo-password` is not given; otherwise a password is generated and printed once |
+| | `SIM_TENANT_SECRET` | empty | simulator only: when set, each tenant's entry token, API key and passwords are derived from it and the tenant id (same secrets after every restart); empty keeps them random |
+| | `PORT`, `HOST`, `SIM_PORT`, `SIM_HOST` | 8080, `0.0.0.0`, 8001, `127.0.0.1` | listener addresses; with `ROLE=all` and no `SIM_ADMIN_TOKEN` the supervisor generates one |
 | Hosting (opt-in) | `DEPLOY_MODE`, `PUBLIC_SIM_PROXY` | off | headless only, secure cookies, JSON logs; expose the simulator through the worker's port |
 | | `ACCESS_PASSWORD`, `SESSION_SECRET`, `MAX_RUNS_PER_DAY` | empty, empty, 0 | single-user mode only (ignored when the database is on): shared password gate, cookie signing, daily cap |
 
-Per-organization settings (approval mode and timeout, separation of duties, run and concurrency limits, LLM budgets, model chain, memory) are edited under **Admin > Organization settings** and listed in [docs/MULTI_USER.md](docs/MULTI_USER.md). Simulator-only variables (`SIM_CHAOS`, `SIM_TODAY`, `SIM_PORT`, `SIM_HOST`, `SIM_DATA_DIR`) are read from the shell, not from `.env`.
+Per-organization settings (approval mode and timeout, separation of duties, run and concurrency limits, LLM budgets, model chain, memory) are edited under **Admin > Organization settings** and listed in [docs/MULTI_USER.md](docs/MULTI_USER.md). Simulator-only variables (`SIM_CHAOS`, `SIM_TODAY`, `SIM_PORT`, `SIM_HOST`, `SIM_DATA_DIR`, `SIM_TENANT_SECRET`) are read from the shell, not from `.env`.
 
 ---
 
@@ -676,7 +690,7 @@ Per-organization settings (approval mode and timeout, separation of duties, run 
 - **No SSO or OIDC, no MFA, no password change or reset, and no way to create an organization from the UI or API** (organizations come from the seed or SQL; admins add members to existing ones). Login throttling is per e-mail and per address (behind a proxy it needs `DEPLOY_MODE` so the forwarded address is used).
 - **The workspace folder is shared by all organizations** (section 4.6), and `python -m worker.vault` manages only the file vault.
 - **Scaling was measured on one machine** with a policy LLM, in one region, for minutes, not hours. A longer soak (the memory drift could be a leak or a plateau) and a real model run are still to do.
-- **The Cloud Run deployment is pending.** The container in `Dockerfile` / `deploy/start.py` is the single-user shape (see 1.6). A multi-user deployment needs the API and worker services, a cloud PostgreSQL, secrets in a secret manager, shared artifact storage and a budget alert.
+- **The Cloud Run deployment is single-instance and its pipeline is untested against a real project.** `max-instances 1` because the simulated company lives inside the container; its SQLite data and the run artifacts are ephemeral, so every start creates fresh tenants (the start-up resync rewrites the vault) and a stopped instance resumes its runs from the last checkpoint on the next start. Bills and other data created inside the simulated company are lost on a restart (it stands in for external systems), but its logins are stable because `SIM_TENANT_SECRET` makes them deterministic. See [docs/DEPLOY.md](docs/DEPLOY.md). The workflows pass `actionlint` and the image was not built locally (no Docker here), so the first real deploy is the real test.
 - **Dates are anchored to the real current date**, so seeded data shifts day to day (`SIM_TODAY` can pin it). The agent's own "today" comes from the host clock.
 - **Real-model eval table pending** (section 11).
 
@@ -687,7 +701,7 @@ Per-organization settings (approval mode and timeout, separation of duties, run 
 In priority order:
 
 1. **Rerun the real-Gemini evals** across all eight scenarios, in parallel across tenants within the free quota, and publish the table.
-2. **Deploy it.** API and worker services on Cloud Run (or similar) with a cloud PostgreSQL, Secret Manager for `VAULT_KEY` and the Gemini key, and a budget alert; run an hour-long soak there and recycle a worker's Chromium after N contexts if the memory drift turns out to be real.
+2. **Prove the deployment.** The pipeline to Cloud Run exists (section 12.2); run it against a real project, then an hour-long soak there, and recycle a worker's Chromium after N contexts if the memory drift turns out to be real. After that, split the API and the workers into separate services with shared storage for the simulator and the artifacts, so the service can scale past one instance.
 3. **Object storage for artifacts** behind the `RunStore` seam (`artifact_dir` / `artifact_file`), served by signed URL, so resumed runs and any API copy see every file.
 4. **Database-enforced fencing.** A claim token checked in the SQL of every run write, replacing the in-process fence.
 5. **Identity.** OIDC single sign-on, MFA, password change and reset, session listing.
@@ -744,59 +758,61 @@ No agent framework (LangChain, LlamaIndex, AutoGen and similar) is used, deliber
 
 ```
 oneforall-agent/
-├── run.py                    start simulator (:8001) + API/dashboard (:8000) [+ N workers in database mode]
-├── requirements.txt  pytest.ini  alembic.ini  .env.example  Dockerfile  .gitignore
-├── requirements-dev.txt  constraints.txt  pyproject.toml  .gitleaks.toml    dev tools, exact pinned versions, ruff config, secret-scan allowlist
-├── .github/                  workflows/ (ci, security, nightly, evals), scripts/ (summary helpers), dependabot.yml
-├── scripts/
-│   ├── bootstrap.py          create the database, migrate, seed demo orgs/users, --provision-sim
-│   └── loadtest.py           the load test (writes docs/loadtest-results.json and .md)
-├── deploy/start.py           container entry point (single-user shape)
-├── company_sim/              simulated company (FastAPI + Jinja2 + SQLite), multi-tenant
-│   ├── app.py  __main__.py   app wiring, `python -m company_sim`
-│   ├── apps/                 mail.py  portal.py  erp.py (UI + REST API)  admin.py (chaos, reset, tenants, state)
-│   ├── tenants.py            tenant registry, per-tenant db/PDF paths, provisioning
-│   ├── tenant_web.py         entry route /t/<token>/, cookie and API-key tenant resolution
-│   ├── seed.py  db.py        deterministic seed data, schema
-│   ├── chaos.py              failure-injection flags (per tenant)
-│   ├── auth.py  state.py     cookie sessions (per tenant); ground-truth queries for evals
-│   ├── pdfgen.py             invoice PDFs
-│   └── templates/ static/    HTML for the three apps
-├── worker/
-│   ├── config.py             settings (env / .env)
-│   ├── server.py             API app factory: file-mode run endpoints, wiring of the routers, scenarios, sim proxy
-│   ├── auth.py               sign-in, sessions, roles, OrgContext, CSRF guard, throttling, audit
-│   ├── admin_api.py          members, org settings, credentials, environment, audit
-│   ├── runs_api.py           database-mode runs, respond, approvals inbox, event WebSockets
-│   ├── memory_api.py  usage_api.py  system_api.py   org memory admin, usage reports, /healthz /readyz /metrics, System card
-│   ├── jobqueue.py           enqueue, claim, lease, heartbeat, reap, cancel (the SQL of the queue)
-│   ├── jobs.py               the worker process: `python -m worker.jobs`
-│   ├── run_context.py        what starting a run needs (org settings, environment, LLM)
-│   ├── approvals_pg.py       durable approval rows and their state changes
-│   ├── live.py  pg_listen.py event fan-out hub; the LISTEN connection with reconnect
-│   ├── store.py  store_pg.py RunStore protocol, FileRunStore; PgRunStore (org-scoped)
-│   ├── event_log.py          events synthesized for runs without a log
-│   ├── vault.py  vault_pg.py credential vault (Fernet), file and PostgreSQL backends; `python -m worker.vault`
-│   ├── redaction.py          Redactor and RedactingStore
-│   ├── provisioning.py       create/reset an org's simulated company, store its logins
-│   ├── org_settings.py       per-org settings, approval rights, separation of duties
-│   ├── memory_store.py       organization memory: screening, write gate, recall, governance
-│   ├── usage.py              usage ledger, daily budget guard, reports
-│   ├── metrics.py  logging_setup.py  observability.py  health.py    Prometheus metrics, JSON logs, request middleware, readiness
-│   ├── deploy.py             opt-in hosting helpers: access gate, sim proxy, daily cap
-│   ├── db/                   models.py  session.py  migrate.py  bootstrap.py  seed.py  migrations/versions/ (5 revisions)
-│   ├── agent/                runner.py  context.py  state.py  memory.py  policy.py  guards.py  verifier.py
-│   │                         report.py  broker.py  pg_broker.py  prompts.py  thoughts.py  toolset.py  cli.py
-│   ├── llm/                  base.py  gemini.py  ollama.py  failover.py  resilient.py  factory.py  fake.py
-│   │                         limiter.py  health_pg.py  policy.py
-│   ├── tools/                base.py  registry.py  retry.py  browser.py  browser_pool.py  snapshot.py/.js
-│   │                         files.py  http.py  secrets.py  memory_tools.py  interaction.py  control.py
-│   └── ui/                   index.html  app.js  admin.js  approvals.js  memory.js  styles.css (dashboard)
-├── evals/                    scenarios/*.yaml, run.py (runner), checkers.py, scenarios.py, simstate.py, results/
-├── tests/                    622 tests (scripted LLM, local HTML fixtures, a throwaway PostgreSQL database)
-├── workspace/                the agent's "shared drive": credentials.json, README.txt
-├── docs/                     ARCHITECTURE.md  MULTI_USER.md  SCALING.md  DEMO_SCRIPT.md  loadtest-results.md/.json
-└── runs/                     (generated) per-run screenshots, downloads, report.md; file-mode run logs
+â”œâ”€â”€ run.py                    start simulator (:8001) + API/dashboard (:8000) [+ N workers in database mode]
+â”œâ”€â”€ requirements.txt  pytest.ini  alembic.ini  .env.example  Dockerfile  .gitignore
+â”œâ”€â”€ requirements-dev.txt  constraints.txt  pyproject.toml  .gitleaks.toml    dev tools, exact pinned versions, ruff config, secret-scan allowlist
+â”œâ”€â”€ .github/                  workflows/ (ci, security, nightly, evals, deploy, _deploy-env, rollback), scripts/ (summary helpers), dependabot.yml
+â”œâ”€â”€ scripts/
+â”‚   â”œâ”€â”€ bootstrap.py          create the database, migrate, seed demo orgs/users, --provision-sim
+â”‚   â””â”€â”€ loadtest.py           the load test (writes docs/loadtest-results.json and .md)
+â”œâ”€â”€ deploy/
+â”‚   â”œâ”€â”€ start.py              container entry point: role-based supervisor (simulator, resync, API, job workers)
+â”‚   â””â”€â”€ gcp/setup.sh          one-time Google Cloud setup (APIs, registry, service accounts, Workload Identity, secrets, budget)
+â”œâ”€â”€ company_sim/              simulated company (FastAPI + Jinja2 + SQLite), multi-tenant
+â”‚   â”œâ”€â”€ app.py  __main__.py   app wiring, `python -m company_sim`
+â”‚   â”œâ”€â”€ apps/                 mail.py  portal.py  erp.py (UI + REST API)  admin.py (chaos, reset, tenants, state)
+â”‚   â”œâ”€â”€ tenants.py            tenant registry, per-tenant db/PDF paths, provisioning
+â”‚   â”œâ”€â”€ tenant_web.py         entry route /t/<token>/, cookie and API-key tenant resolution
+â”‚   â”œâ”€â”€ seed.py  db.py        deterministic seed data, schema
+â”‚   â”œâ”€â”€ chaos.py              failure-injection flags (per tenant)
+â”‚   â”œâ”€â”€ auth.py  state.py     cookie sessions (per tenant); ground-truth queries for evals
+â”‚   â”œâ”€â”€ pdfgen.py             invoice PDFs
+â”‚   â””â”€â”€ templates/ static/    HTML for the three apps
+â”œâ”€â”€ worker/
+â”‚   â”œâ”€â”€ config.py             settings (env / .env)
+â”‚   â”œâ”€â”€ server.py             API app factory: file-mode run endpoints, wiring of the routers, scenarios, sim proxy
+â”‚   â”œâ”€â”€ auth.py               sign-in, sessions, roles, OrgContext, CSRF guard, throttling, audit
+â”‚   â”œâ”€â”€ admin_api.py          members, org settings, credentials, environment, audit
+â”‚   â”œâ”€â”€ runs_api.py           database-mode runs, respond, approvals inbox, event WebSockets
+â”‚   â”œâ”€â”€ memory_api.py  usage_api.py  system_api.py   org memory admin, usage reports, /healthz /readyz /metrics, System card
+â”‚   â”œâ”€â”€ jobqueue.py           enqueue, claim, lease, heartbeat, reap, cancel (the SQL of the queue)
+â”‚   â”œâ”€â”€ jobs.py               the worker process: `python -m worker.jobs`
+â”‚   â”œâ”€â”€ run_context.py        what starting a run needs (org settings, environment, LLM)
+â”‚   â”œâ”€â”€ approvals_pg.py       durable approval rows and their state changes
+â”‚   â”œâ”€â”€ live.py  pg_listen.py event fan-out hub; the LISTEN connection with reconnect
+â”‚   â”œâ”€â”€ store.py  store_pg.py RunStore protocol, FileRunStore; PgRunStore (org-scoped)
+â”‚   â”œâ”€â”€ event_log.py          events synthesized for runs without a log
+â”‚   â”œâ”€â”€ vault.py  vault_pg.py credential vault (Fernet), file and PostgreSQL backends; `python -m worker.vault`
+â”‚   â”œâ”€â”€ redaction.py          Redactor and RedactingStore
+â”‚   â”œâ”€â”€ provisioning.py       create/reset an org's simulated company, store its logins; `python -m worker.provisioning resync`
+â”‚   â”œâ”€â”€ org_settings.py       per-org settings, approval rights, separation of duties
+â”‚   â”œâ”€â”€ memory_store.py       organization memory: screening, write gate, recall, governance
+â”‚   â”œâ”€â”€ usage.py              usage ledger, daily budget guard, reports
+â”‚   â”œâ”€â”€ metrics.py  logging_setup.py  observability.py  health.py    Prometheus metrics, JSON logs, request middleware, readiness
+â”‚   â”œâ”€â”€ deploy.py             opt-in hosting helpers: access gate, sim proxy, daily cap
+â”‚   â”œâ”€â”€ db/                   models.py  session.py  migrate.py  bootstrap.py  seed.py  migrations/versions/ (5 revisions)
+â”‚   â”œâ”€â”€ agent/                runner.py  context.py  state.py  memory.py  policy.py  guards.py  verifier.py
+â”‚   â”‚                         report.py  broker.py  pg_broker.py  prompts.py  thoughts.py  toolset.py  cli.py
+â”‚   â”œâ”€â”€ llm/                  base.py  gemini.py  ollama.py  failover.py  resilient.py  factory.py  fake.py
+â”‚   â”‚                         limiter.py  health_pg.py  policy.py
+â”‚   â”œâ”€â”€ tools/                base.py  registry.py  retry.py  browser.py  browser_pool.py  snapshot.py/.js
+â”‚   â”‚                         files.py  http.py  secrets.py  memory_tools.py  interaction.py  control.py
+â”‚   â””â”€â”€ ui/                   index.html  app.js  admin.js  approvals.js  memory.js  styles.css (dashboard)
+â”œâ”€â”€ evals/                    scenarios/*.yaml, run.py (runner), checkers.py, scenarios.py, simstate.py, results/
+â”œâ”€â”€ tests/                    666 tests (scripted LLM, local HTML fixtures, a throwaway PostgreSQL database)
+â”œâ”€â”€ workspace/                the agent's "shared drive": credentials.json, README.txt
+â”œâ”€â”€ docs/                     ARCHITECTURE.md  MULTI_USER.md  DEPLOY.md  SCALING.md  DEMO_SCRIPT.md  loadtest-results.md/.json
+â””â”€â”€ runs/                     (generated) per-run screenshots, downloads, report.md; file-mode run logs
 ```
 
 ---

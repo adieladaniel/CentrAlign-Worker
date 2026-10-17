@@ -1,7 +1,7 @@
 """Create the PostgreSQL database, run the migrations and seed the demo orgs and users (safe to run repeatedly).
 
     python scripts/bootstrap.py                       # uses DATABASE_URL from .env; prints a generated demo password once
-    python scripts/bootstrap.py --demo-password ...   # choose the demo users' password
+    python scripts/bootstrap.py --demo-password ...   # choose the demo users' password (or set BOOTSTRAP_DEMO_PASSWORD)
     python scripts/bootstrap.py --reset [--yes]       # drop and recreate the `oneforall` database first (asks to confirm)
     python scripts/bootstrap.py --provision-sim       # also create each demo org's own simulated company (sim must be running)
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -21,7 +22,8 @@ from worker.db.session import mask_url, normalize_url  # noqa: E402
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--demo-password", help="password for the demo users (default: generated and printed once)")
+    parser.add_argument("--demo-password", help="password for the demo users (default: BOOTSTRAP_DEMO_PASSWORD from the "
+                                                "environment, else generated and printed once)")
     parser.add_argument("--reset", action="store_true", help="drop and recreate the database first (DESTROYS ALL ITS DATA)")
     parser.add_argument("--provision-sim", action="store_true",
                         help="create the demo orgs' simulated companies and store their logins in the vault "
@@ -29,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--yes", action="store_true", help="do not ask for confirmation with --reset")
     args = parser.parse_args(argv)
 
+    from_env = not args.demo_password and bool(os.environ.get("BOOTSTRAP_DEMO_PASSWORD", "").strip())
+    demo_password = args.demo_password or os.environ.get("BOOTSTRAP_DEMO_PASSWORD", "").strip() or None
     raw = get_settings().DATABASE_URL.strip()
     if not raw:
         print("error: DATABASE_URL is not set (see .env.example)", file=sys.stderr)
@@ -42,11 +46,11 @@ def main(argv: list[str] | None = None) -> int:
             print("aborted.")
             return 1
     try:
-        result = asyncio.run(bootstrap(url, demo_password=args.demo_password, reset=args.reset, provision_sim=args.provision_sim))
+        result = asyncio.run(bootstrap(url, demo_password=demo_password, reset=args.reset, provision_sim=args.provision_sim))
     except Exception as exc:  # noqa: BLE001 - a readable message that never contains the password
         print(f"error: could not bootstrap {mask_url(url)}: {type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}", file=sys.stderr)
         return 2
-    print(describe(result, url))
+    print(describe(result, url, show_password=not from_env))  # a password from the environment stays out of job logs
     return 0
 
 

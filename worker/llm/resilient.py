@@ -16,6 +16,7 @@ from worker.llm.base import (
     LLMClient,
     LLMError,
     LLMResponse,
+    MalformedCallError,
     Message,
     RateLimitError,
     ToolCall,
@@ -25,6 +26,10 @@ from worker.llm.base import (
 )
 
 log = logging.getLogger(__name__)
+
+MAX_MALFORMED_RETRIES = 2  # re-asks after a malformed function call (a budget of its own, apart from ``max_retries``)
+MALFORMED_TEMPERATURE_STEP = 0.3  # added to the temperature on each such re-ask so the sample differs
+MAX_RETRY_TEMPERATURE = 1.0
 
 
 class RateLimiter(Protocol):
@@ -95,7 +100,9 @@ class ResilientLLM(LLMClient):
     budget* (``network_retry_s``, capped backoff up to ``max_network_delay_s``) so a run survives a few minutes
     without internet. ``on_retry(info)`` (sync or async) is called before each network wait; an exception it
     raises aborts the call (the runner uses this to honor cancellation). Tool calls that name an unknown tool or violate the tool's schema
-    trigger one corrective re-prompt; if the second answer is still invalid it is returned as-is.
+    trigger one corrective re-prompt; if the second answer is still invalid it is returned as-is. A ``MalformedCallError``
+    (the model's function call was broken) is re-asked at most ``max_malformed_retries`` times with a higher
+    temperature each time; that budget is separate from ``max_retries``.
 
     Three optional seams serve the multi-user deployment (all default to today's behaviour):
 
@@ -116,6 +123,7 @@ class ResilientLLM(LLMClient):
         max_delay_s: float = 90.0,
         network_retry_s: float = 300.0,
         max_network_delay_s: float = 30.0,
+        max_malformed_retries: int = MAX_MALFORMED_RETRIES,
         on_retry: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -131,6 +139,7 @@ class ResilientLLM(LLMClient):
         self.max_delay_s = max_delay_s
         self.network_retry_s = network_retry_s
         self.max_network_delay_s = max_network_delay_s
+        self.max_malformed_retries = max_malformed_retries
         self.on_retry = on_retry
         self._sleep = sleep
         self._clock = clock
@@ -214,6 +223,7 @@ class ResilientLLM(LLMClient):
         tool_choice: Literal["auto", "any", "none"],
     ) -> LLMResponse:
         attempt = 0
+        malformed = 0
         net_attempts = 0
         net_since: float | None = None  # when the current network outage was first seen
         while True:
@@ -221,6 +231,15 @@ class ResilientLLM(LLMClient):
             attempt_started = self._clock()
             try:
                 response = await self.inner.complete(messages, tools, temperature=temperature, tool_choice=tool_choice)
+            except MalformedCallError:
+                # The same prompt may fail the same way, so each re-ask samples hotter; the budget is its own.
+                metrics.llm_call(self._model_label(), "malformed", self._clock() - attempt_started)
+                if malformed >= self.max_malformed_retries:
+                    raise
+                malformed += 1
+                self.retries += 1
+                temperature = max(temperature, min(MAX_RETRY_TEMPERATURE, temperature + MALFORMED_TEMPERATURE_STEP))
+                continue
             except (RateLimitError, TransientLLMError) as err:
                 metrics.llm_call(self._model_label(), "rate_limited" if isinstance(err, RateLimitError)
                                  else "network" if err.network else "transient", self._clock() - attempt_started)

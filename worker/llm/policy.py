@@ -745,6 +745,9 @@ def _verdict(criteria: list[str], checks: list[tuple[str, bool, str]], summary: 
     return Decision(summary, [("submit_verdict", {
         "passed": all(ok for _, ok, _ in checks),
         "checks": [{"criterion": c, "passed": ok, "observed": note} for c, ok, note in checks],
+        # The scripted flow names one invoice number, so there is neither a second matching entity nor a "latest" to find.
+        "ambiguity": {"passed": True, "observed": "The task names one invoice number; no other entity competes for it."},
+        "completeness": {"passed": True, "observed": "The task names a specific invoice, not the latest or all of them."},
         "summary": summary})])
 
 

@@ -1,0 +1,113 @@
+name: Deploy
+
+# Continuous deployment to Google Cloud Run: after CI succeeds on main, build one image, then roll it out to staging and
+# (after the approval you set on the "production" GitHub Environment) to production. See docs/DEPLOY.md.
+# Until the repository variable GCP_PROJECT_ID is set, every job is skipped, so pushes stay green before the setup is done.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      seed_demo:
+        description: Seed the demo organizations and users (first deploy; safe to repeat, existing users are kept)
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false # a running rollout is never cut short; the next one waits
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and push the image
+    # Only CI runs that succeeded on a push to main of this repository (not pull requests, not forks), or a manual run on main.
+    if: >-
+      vars.GCP_PROJECT_ID != '' &&
+      ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository) ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation: no long-lived Google key is stored in GitHub
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev
+      IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GAR_REPOSITORY }}/oneforall-agent
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      sha: ${{ env.SHA }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Let Docker push to Artifact Registry
+        run: gcloud auth configure-docker "$REGISTRY" --quiet
+      - uses: docker/setup-buildx-action@v4
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.SHA }}
+          provenance: false # a plain image manifest: Cloud Run deploys it by digest without the attestation index
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Image reference by digest
+        id: ref
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          if [ -z "$DIGEST" ]; then
+            echo "::error::the build did not report an image digest"
+            exit 1
+          fi
+          echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Image"
+            echo
+            echo "- commit: \`${SHA}\`"
+            echo "- image: \`${IMAGE}@${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  staging:
+    name: Staging
+    needs: build
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_deploy-env.yml
+    with:
+      environment: staging
+      image: ${{ needs.build.outputs.image }}
+      sha: ${{ needs.build.outputs.sha }}
+      seed_demo: ${{ inputs.seed_demo == true }}
+
+  production:
+    name: Production
+    # The "production" GitHub Environment holds the required reviewers: the job waits for approval before it starts.
+    needs: [build, staging]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_deploy-env.yml
+    with:
+      environment: production
+      image: ${{ needs.build.outputs.image }}
+      sha: ${{ needs.build.outputs.sha }}
+      seed_demo: ${{ inputs.seed_demo == true }}

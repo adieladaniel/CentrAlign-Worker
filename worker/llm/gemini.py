@@ -26,6 +26,7 @@ from worker.llm.base import (
     LLMClient,
     LLMError,
     LLMResponse,
+    MalformedCallError,
     Message,
     ModelUnavailableError,
     QuotaExhaustedError,
@@ -256,12 +257,13 @@ def parse_response(
     and are decoded back into dicts here.
     """
     candidates = getattr(resp, "candidates", None) or []
+    # Checked first: a malformed call usually comes back with no content at all, and is recoverable (unlike "no content").
+    if candidates and str(candidates[0].finish_reason).endswith("MALFORMED_FUNCTION_CALL"):
+        raise MalformedCallError("Gemini produced a malformed function call")
     if not candidates or candidates[0].content is None:
         reason = candidates[0].finish_reason if candidates else getattr(resp, "prompt_feedback", None)
         raise LLMError(f"Gemini returned no content ({reason})")
     candidate = candidates[0]
-    if str(candidate.finish_reason).endswith("MALFORMED_FUNCTION_CALL"):
-        raise TransientLLMError("Gemini produced a malformed function call")
 
     text_parts: list[str] = []
     thought_parts: list[str] = []

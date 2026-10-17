@@ -1,0 +1,230 @@
+name: Deploy one environment
+
+# Called by deploy.yml, once for "staging" and once for "production". Steps: migrate the database (Cloud Run job), optionally
+# seed the demo users, deploy the new revision WITHOUT traffic, smoke test it on its own URL, and only then move traffic to it.
+# A failed smoke test leaves traffic on the previous revision.
+#
+# Environment-level GitHub variables (Settings > Environments): CLOUD_RUN_SERVICE, SECRET_PREFIX.
+# Repository-level variables: GCP_PROJECT_ID, GCP_REGION, WIF_PROVIDER, DEPLOYER_SA, RUNTIME_SA (GAR_REPOSITORY is used by deploy.yml).
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment to deploy to (staging or production)
+        type: string
+        required: true
+      image:
+        description: Image reference by digest, in Artifact Registry
+        type: string
+        required: true
+      sha:
+        description: Commit the image was built from (names the revision tag)
+        type: string
+        required: true
+      seed_demo:
+        description: Seed the demo organizations and users after the migration
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+      SECRET_PREFIX: ${{ vars.SECRET_PREFIX }}
+      RUNTIME_SA: ${{ vars.RUNTIME_SA }}
+      IMAGE: ${{ inputs.image }}
+      COMMIT_SHA: ${{ inputs.sha }}
+      CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+    steps:
+      - name: Check the configuration
+        run: |
+          missing=0
+          for name in PROJECT REGION SERVICE SECRET_PREFIX RUNTIME_SA IMAGE COMMIT_SHA; do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name} is empty: set the matching GitHub variable (see docs/DEPLOY.md)"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # 1. Migrate the database in a Cloud Run job: the same image and the environment's own DATABASE_URL secret.
+      - name: Deploy and run the migration job
+        run: |
+          job="${SERVICE}-migrate"
+          gcloud run jobs deploy "$job" \
+            --project "$PROJECT" --region "$REGION" \
+            --image "$IMAGE" \
+            --command python3 --args=-m,worker.db,migrate \
+            --set-secrets "DATABASE_URL=${SECRET_PREFIX}-database-url:latest" \
+            --service-account "$RUNTIME_SA" \
+            --cpu 1 --memory 512Mi --max-retries 0 --task-timeout 600s
+          gcloud run jobs execute "$job" --project "$PROJECT" --region "$REGION" --wait
+
+      # 2. Seed the demo organizations and users (only when asked; existing users keep their passwords).
+      - name: Deploy and run the seed job
+        if: inputs.seed_demo
+        run: |
+          job="${SERVICE}-seed"
+          gcloud run jobs deploy "$job" \
+            --project "$PROJECT" --region "$REGION" \
+            --image "$IMAGE" \
+            --command python3 --args=scripts/bootstrap.py \
+            --set-secrets "DATABASE_URL=${SECRET_PREFIX}-database-url:latest,BOOTSTRAP_DEMO_PASSWORD=${SECRET_PREFIX}-demo-password:latest" \
+            --service-account "$RUNTIME_SA" \
+            --cpu 1 --memory 512Mi --max-retries 0 --task-timeout 600s
+          gcloud run jobs execute "$job" --project "$PROJECT" --region "$REGION" --wait
+
+      # 3. Deploy the new revision. On the first deploy the service does not exist yet and --no-traffic is not allowed, so
+      #    the first revision takes traffic at once (there is nothing older to protect).
+      - name: Deploy the new revision without traffic
+        id: deploy
+        run: |
+          tag="sha-${COMMIT_SHA:0:7}"
+          previous=""
+          first=false
+          if gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format=json > before.json 2> /dev/null; then
+            previous=$(jq -r '[.status.traffic[]? | select((.percent // 0) > 0)] | sort_by(-(.percent // 0)) | .[0].revisionName // empty' before.json)
+            traffic_flags=(--no-traffic --tag "$tag")
+          else
+            first=true
+            traffic_flags=()
+            echo "The service ${SERVICE} does not exist yet: this is the first deploy."
+          fi
+          {
+            echo "previous=${previous}"
+            echo "first=${first}"
+            echo "tag=${tag}"
+          } >> "$GITHUB_OUTPUT"
+
+          # Instance-based billing (--no-cpu-throttling) because the job worker runs in the background; one instance
+          # because the simulated company lives inside the container (a second instance would have different tenants).
+          gcloud run deploy "$SERVICE" \
+            --project "$PROJECT" --region "$REGION" \
+            --image "$IMAGE" \
+            --execution-environment gen2 \
+            --no-cpu-throttling --cpu-boost \
+            --cpu 2 --memory 2Gi \
+            --min-instances 0 --max-instances 1 \
+            --timeout 3600 \
+            --session-affinity \
+            --port 8080 \
+            --allow-unauthenticated \
+            --service-account "$RUNTIME_SA" \
+            --set-env-vars "ROLE=all,DEPLOY_MODE=1,PUBLIC_SIM_PROXY=1,LOG_FORMAT=json,WORKER_CONCURRENCY=2" \
+            --set-secrets "GEMINI_API_KEY=ofa-gemini-api-key:latest,DATABASE_URL=${SECRET_PREFIX}-database-url:latest,SESSION_SECRET=${SECRET_PREFIX}-session-secret:latest,VAULT_KEY=${SECRET_PREFIX}-vault-key:latest,METRICS_TOKEN=${SECRET_PREFIX}-metrics-token:latest,SIM_TENANT_SECRET=${SECRET_PREFIX}-sim-tenant-secret:latest" \
+            "${traffic_flags[@]}"
+
+          gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format=json > after.json
+          service_url=$(jq -r '.status.url' after.json)
+          new_revision=$(jq -r '.status.latestCreatedRevisionName' after.json)
+          if [ "$first" = "true" ]; then
+            smoke_url="$service_url"
+          else
+            smoke_url=$(jq -r --arg tag "$tag" '[.status.traffic[]? | select(.tag == $tag)] | .[0].url // empty' after.json)
+          fi
+          if [ -z "$smoke_url" ] || [ "$smoke_url" = "null" ]; then
+            echo "::error::could not find the URL of the new revision (tag ${tag})"
+            exit 1
+          fi
+          {
+            echo "service_url=${service_url}"
+            echo "smoke_url=${smoke_url}"
+            echo "new_revision=${new_revision}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice title=New revision::${new_revision} at ${smoke_url} (serving now: ${previous:-nothing})"
+
+      # 4. Smoke test the new revision on its own URL. The first request starts the container (sim, migration check,
+      #    environment resync, API, job worker), which takes a while, so /readyz is retried for about 3 minutes.
+      - name: Smoke test the new revision
+        id: smoke
+        env:
+          SMOKE_URL: ${{ steps.deploy.outputs.smoke_url }}
+        run: |
+          status() {
+            curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${SMOKE_URL}$1" || true
+          }
+          deadline=$((SECONDS + 180))
+          until [ "$(status /readyz)" = "200" ]; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::${SMOKE_URL}/readyz did not return 200 within 3 minutes"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "/readyz 200"
+          for path in /healthz /; do
+            code=$(status "$path")
+            echo "${path} ${code}"
+            if [ "$code" != "200" ]; then
+              echo "::error::${SMOKE_URL}${path} returned ${code}, expected 200"
+              exit 1
+            fi
+          done
+
+      # 5. Only now does the new revision take traffic.
+      - name: Send traffic to the new revision
+        if: steps.deploy.outputs.first != 'true'
+        run: gcloud run services update-traffic "$SERVICE" --project "$PROJECT" --region "$REGION" --to-latest
+
+      - name: The smoke test failed, traffic stays on the previous revision
+        if: failure() && steps.smoke.outcome == 'failure'
+        env:
+          PREVIOUS: ${{ steps.deploy.outputs.previous }}
+          NEW_REVISION: ${{ steps.deploy.outputs.new_revision }}
+        run: |
+          echo "::error title=Smoke test failed::${NEW_REVISION} did not pass. Traffic was NOT moved."
+          if [ -n "$PREVIOUS" ]; then
+            echo "Traffic is still on the previous revision: ${PREVIOUS}"
+            echo "Nothing to undo. If it ever needs to be pinned again:"
+            echo "  gcloud run services update-traffic ${SERVICE} --project ${PROJECT} --region ${REGION} --to-revisions ${PREVIOUS}=100"
+          else
+            echo "This was the first deploy, so there is no previous revision to fall back to."
+          fi
+          echo "Logs of the new revision:"
+          echo "  gcloud run services logs read ${SERVICE} --project ${PROJECT} --region ${REGION} --limit 100"
+
+      - name: Summary
+        if: always()
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          PREVIOUS: ${{ steps.deploy.outputs.previous }}
+          NEW_REVISION: ${{ steps.deploy.outputs.new_revision }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+          SEEDED: ${{ inputs.seed_demo }}
+        run: |
+          {
+            echo "### Deploy to ${ENVIRONMENT}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| URL | ${SERVICE_URL:-unknown} |"
+            echo "| image | \`${IMAGE}\` |"
+            echo "| new revision | \`${NEW_REVISION:-none}\` |"
+            echo "| previous revision | \`${PREVIOUS:-none}\` |"
+            echo "| smoke test | ${SMOKE_OUTCOME:-not run} |"
+            echo "| demo seed | ${SEEDED} |"
+            if [ "$SMOKE_OUTCOME" = "success" ]; then
+              echo
+              echo "Roll back with the **Rollback** workflow, or: \`gcloud run services update-traffic ${SERVICE} --region ${REGION} --to-revisions ${PREVIOUS:-PREVIOUS_REVISION}=100\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

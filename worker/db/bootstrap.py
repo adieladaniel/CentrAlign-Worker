@@ -32,9 +32,18 @@ def _quote(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def _connect_args(url: URL, database: str) -> dict:
+    """Keyword arguments for a raw ``asyncpg.connect`` to ``database`` on the server of ``url`` (TLS setting included,
+    which managed hosts such as Neon require)."""
+    args: dict = {"host": url.host, "port": url.port or 5432, "user": url.username, "password": url.password,
+                  "database": database}
+    if url.query.get("ssl"):
+        args["ssl"] = url.query["ssl"]
+    return args
+
+
 async def _admin_connection(url: URL) -> asyncpg.Connection:
-    return await asyncpg.connect(host=url.host, port=url.port or 5432, user=url.username, password=url.password,
-                                 database="postgres")
+    return await asyncpg.connect(**_connect_args(url, "postgres"))
 
 
 async def database_exists(url: str | URL) -> bool:
@@ -47,8 +56,15 @@ async def database_exists(url: str | URL) -> bool:
 
 
 async def create_database(url: str | URL) -> bool:
-    """Create the database named by ``url`` if it does not exist. Returns True when it was created."""
+    """Create the database named by ``url`` if it does not exist. Returns True when it was created. When the database can
+    already be reached directly nothing else is needed, so a hosted database (Neon) whose role cannot use the
+    ``postgres`` maintenance database still works."""
     url = normalize_url(url)
+    try:
+        await (await asyncpg.connect(**_connect_args(url, url.database))).close()
+        return False
+    except asyncpg.InvalidCatalogNameError:
+        pass  # the database does not exist yet: create it through the maintenance database
     conn = await _admin_connection(url)
     try:
         if await conn.fetchval("select 1 from pg_database where datname = $1", url.database):
@@ -132,8 +148,10 @@ async def bootstrap(url: str | URL, *, demo_password: str | None = None, reset: 
                            provision_note=note)
 
 
-def describe(result: BootstrapResult, url: str | URL) -> str:
-    """Human-readable summary (never contains the database password; the demo password is shown once, if new)."""
+def describe(result: BootstrapResult, url: str | URL, *, show_password: bool = True) -> str:
+    """Human-readable summary (never contains the database password; the demo password is shown once, if new). With
+    ``show_password=False`` (the caller supplied the password, e.g. from a secret) it is left out of the text, which may
+    end up in a job log."""
     lines = [f"database:  {mask_url(url)} ({'created' if result.created_database else 'already existed'}"
              f"{', after reset' if result.reset else ''})", f"revision:  {result.revision}"]
     seed = result.seed
@@ -142,7 +160,7 @@ def describe(result: BootstrapResult, url: str | URL) -> str:
     if result.password:
         lines += ["", "Demo users (all share one password; it is shown only now):"]
         lines += [f"  {email:<22} {role}" for email, role in seed.users_created.items()]
-        lines += [f"  password: {result.password}"]
+        lines += [f"  password: {result.password}" if show_password else "  password: the one you supplied (not printed)"]
     else:
         lines.append("demo users already existed: their passwords were not changed.")
     if result.provisioned:

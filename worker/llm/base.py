@@ -90,6 +90,17 @@ class TransientLLMError(LLMError):
         self.network = network
 
 
+class MalformedCallError(TransientLLMError):
+    """The model answered with a broken function call (Gemini's ``MALFORMED_FUNCTION_CALL``).
+
+    A per-response glitch, not an outage: a failover client tries the next model for the same call *without* marking
+    the first one unusable, ResilientLLM re-asks a couple of times with a slightly higher temperature, and the agent
+    runner treats one that still escapes as a failed turn (corrective note, failure guard) instead of ending the run."""
+
+    def __init__(self, message: str = "The model produced a malformed function call"):
+        super().__init__(message)
+
+
 _NETWORK_ERRNOS = {
     errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED, errno.ENETUNREACH, errno.ENETDOWN, errno.EHOSTUNREACH,
     11001, 11002, 11003, 11004,  # WSAHOST_NOT_FOUND / TRY_AGAIN / NO_RECOVERY / NO_DATA (Windows DNS)

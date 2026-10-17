@@ -62,7 +62,8 @@ def fast(**overrides):
 
 def verdict(passed: bool):
     return reply("", call("submit_verdict", passed=passed, summary="audit",
-                          checks=[{"criterion": "the work is done", "passed": passed, "observed": "saw it"}]))
+                          checks=[{"criterion": "the work is done", "passed": passed, "observed": "saw it"}],
+                          ambiguity={"passed": True, "observed": "single candidate"}, completeness={"passed": True, "observed": "single candidate"}))
 
 
 def durable(key: str = "erp_bill_date_format", value: str = DATE_NOTE, scope: str = "erp", **extra):

@@ -12,7 +12,9 @@ systems, never on a description of what should be done. Do the work; do not narr
 Before acting, in your first turn:
 1. Restate the end goal in one sentence.
 2. Define concrete, checkable success criteria (what exact state of which system proves the job is done). When the \
-job creates or changes a record, include "every field of the record matches the source".
+job creates or changes a record, include "every field of the record matches the source". When they apply, also \
+include "checked every matching entity" (the task names something loosely) and "compared candidates from every \
+source" (the task asks for the latest / newest / all).
 3. Note what you do not know yet.
 4. Call `update_plan` with goal_summary, success_criteria and a short checklist (3-8 items). Infer the intermediate \
 steps yourself; the user only gave you the goal.
@@ -25,8 +27,12 @@ first. Use `ask_user` only when information is genuinely missing, or ambiguous i
 (for example two equally plausible matches, or conflicting amounts), or when proceeding would be unsafe. Ask one \
 precise question, with options when you can. Never ask for something you could look up.
 Before you pick from a list, dropdown or search result, check whether more than one entry matches the user's wording \
-(for example "Company X" when both "Company X Ltd" and "Company X Holdings" exist). If several match and nothing in \
-the task or the environment tells them apart, ask instead of choosing.
+(for example "Northwind" when both "Northwind Trading" and "Northwind Group" exist). When two or more entities fit, \
+look for the requested item for EACH of them before choosing. If more than one has a candidate, `ask_user` which one \
+(with the options); if only one has a candidate, proceed and mention the other in your report.
+When the task asks for the latest / newest / most recent item, collect candidates from every source you can access \
+that could hold it (for example both the mailbox and the portal) and compare dates before choosing. A source \
+document beats a list view.
 
 ## Work loop
 - One purposeful step at a time. Read each observation carefully before choosing the next action.
@@ -96,14 +102,26 @@ where relevant.
 - If the task created or changed a record, check every field of the record against the source document or system, \
 not only the fields named in the success criteria (including dates and optional fields). Report any mismatch, or \
 any value with no source, as a failed check.
-- Be efficient: you have a small step budget. Go straight to the places where the outcome should be visible.
+- Be efficient: you have a small step budget. Go straight to the places where the outcome should be visible, and \
+reserve part of the budget for the two mandatory checks below; they are where workers most often go wrong.
 - If the task or criteria are vague, derive reasonable concrete checks from the task text.
-- If the task's wording matches more than one entity in the systems (for example two vendors whose names both fit) \
-and the worker neither asked the user nor cited a reason for its choice, fail that check and say which alternatives \
-exist.
-- When done, call `submit_verdict` exactly once with passed (true only if every criterion passed), one check per \
-criterion (criterion, passed, observed: what you actually saw), and a short summary. Say precisely what is wrong \
-when something fails, so the worker can fix it.
+
+Two checks are mandatory in EVERY verdict, in addition to one check per success criterion. The briefing lists the \
+worker's questions to the user (with the answers) and the systems you can look at.
+1. Ambiguity. Does any name or reference in the task match more than one entity in the systems (look at lists, \
+dropdowns, filters, search results)? If so, does another match have a competing candidate for what the task asked \
+(for example another entity with an equally recent item)? FAIL when a competing candidate exists and the worker did \
+not ask the user which one was meant (a question and answer in the briefing). When there is only one real candidate, \
+pass and say why.
+2. Completeness. When the task asks for the latest / newest / all / a specific item, did the worker consider every \
+source that could hold it (every system it had access to, for example both a mailbox and a portal)? Look in the other \
+sources yourself for a newer or competing candidate. FAIL when one exists that the worker missed.
+Do not take the worker's word for either check; open the lists and sources and report what you saw.
+
+- When done, call `submit_verdict` exactly once with passed (true only if every criterion check AND both mandatory \
+checks passed), one check per criterion (criterion, passed, observed: what you actually saw), the `ambiguity` and \
+`completeness` checks (passed, observed), and a short summary. Say precisely what is wrong when something fails, so \
+the worker can fix it.
 """
 
 NO_TOOL_NUDGE = (
@@ -115,6 +133,15 @@ RESUME_NOTE = (
     "before acting; do not repeat a write without first checking whether it already took effect."
 )
 VERIFIER_NO_TOOL_NUDGE = "Call a read-only tool to re-check the system, or call `submit_verdict` if you are done."
+VERIFIER_MISSING_CHECKS = (
+    "Your verdict was not accepted: it lacks {missing}. Every verdict must include the mandatory `ambiguity` and "
+    "`completeness` checks, each with passed and observed (what you saw in the systems). Call `submit_verdict` again "
+    "with them."
+)
+MALFORMED_CALL_NOTE = (
+    "Your previous reply was a malformed tool call and was discarded. Call one tool at a time with simple, valid "
+    "arguments."
+)
 FINISH_NOT_ALONE = (
     "Not processed: `finish` must be called alone, after you have seen the results of your other actions. "
     "Review those results, then call `finish` again."

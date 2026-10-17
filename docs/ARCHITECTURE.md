@@ -688,10 +688,14 @@ cookie on every route including the WebSocket; `/api/health` stays public but mi
 runs and `MAX_RUNS_PER_DAY` caps runs per UTC day (HTTP 429). Disk is assumed ephemeral. None of this changes local
 `python run.py` behavior.
 
-This container is the single-user shape: `deploy/start.py` starts the simulator and the API only, the image has no
-database, and it does not start `python -m worker.jobs`. A multi-user deployment needs the API and worker services as
-separate processes, a cloud PostgreSQL, `VAULT_KEY` and the Gemini key from a secret manager, and shared storage for
-artifacts (section 20); that deployment is not done yet. In multi-user mode `ACCESS_PASSWORD` and the global
+Without a `DATABASE_URL` the container stays the single-user shape described above. With one it is the multi-user
+shape: `deploy/start.py` (`ROLE=all`) starts the simulator, optionally migrates, runs `python -m worker.provisioning resync`
+(the simulator's SQLite data is ephemeral, so every organization's tenant is created again and its logins in the vault
+rewritten), starts the API and then `python -m worker.jobs`; on SIGTERM the job worker stops first so it can hand its runs
+back to the queue. Hosted on Google Cloud Run it runs as one instance (the simulator lives inside the container) against a
+managed PostgreSQL such as Neon, with secrets from Secret Manager and a GitHub Actions pipeline that migrates, deploys
+without traffic, smoke tests and then switches traffic. Artifacts are still local files (section 20). See
+[DEPLOY.md](DEPLOY.md) for the topology, the settings and why. In multi-user mode `ACCESS_PASSWORD` and the global
 `MAX_RUNS_PER_DAY` are ignored (users sign in with their own accounts and the quota is per organization).
 
 ## Observability
@@ -741,7 +745,7 @@ tool, LLM and approval series come from the workers, the HTTP, WebSocket and que
 | `oneforall_queue_wait_seconds` | histogram | `queued_at` to the first claim |
 | `oneforall_tool_calls_total` | counter `tool`, `ok` | tool executions |
 | `oneforall_tool_duration_seconds` | histogram `tool` | tool time, retries included |
-| `oneforall_llm_calls_total` | counter `model`, `outcome` | per attempt: `ok`, `rate_limited`, `network`, `transient`, `error` |
+| `oneforall_llm_calls_total` | counter `model`, `outcome` | per attempt: `ok`, `rate_limited`, `network`, `transient`, `malformed`, `error` |
 | `oneforall_llm_tokens_total` | counter `model`, `direction` | `input` / `output` tokens |
 | `oneforall_llm_latency_seconds` | histogram `model` | time inside the provider call |
 | `oneforall_llm_ratelimit_wait_seconds` | histogram | time spent in `limiter.acquire()` |

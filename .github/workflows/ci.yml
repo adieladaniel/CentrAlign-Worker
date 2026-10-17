@@ -192,6 +192,24 @@ jobs:
     name: Docker image builds and starts
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: ci-test-password
+          POSTGRES_DB: oneforall
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      IMAGE: oneforall-agent:ci
+      # Throwaway server inside this job's service container; the password is a CI-only value, not a secret. The
+      # containers below use --network host, so "localhost" is the runner and reaches the service's mapped port.
+      CI_DATABASE_URL: postgresql://postgres:ci-test-password@localhost:5432/oneforall
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -206,12 +224,12 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Smoke test the container (single-user shape)
         run: |
-          vault_key=$(docker run --rm oneforall-agent:ci python3 -m worker.vault generate-key)
+          vault_key=$(docker run --rm "$IMAGE" python3 -m worker.vault generate-key)
           docker run -d --name ofa -p 8080:8080 \
             -e VAULT_KEY="$vault_key" \
             -e ACCESS_PASSWORD="ci-smoke-$RANDOM$RANDOM" \
             -e SESSION_SECRET="ci-smoke-$RANDOM$RANDOM$RANDOM" \
-            oneforall-agent:ci >/dev/null
+            "$IMAGE" >/dev/null
           for i in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8080/healthz; then
               echo
@@ -222,9 +240,78 @@ jobs:
           done
           echo "the container did not become healthy within 120s"
           exit 1
-      - name: Container logs on failure
+      - name: Container logs on failure (single-user)
         if: failure()
         run: docker logs ofa 2>&1 | tail -100
-      - name: Stop container
+      - name: Stop the single-user container
         if: always()
         run: docker rm -f ofa || true
+      - name: Secrets for the multi-user container
+        run: |
+          demo_password="ci-demo-$(openssl rand -hex 12)"
+          vault_key=$(docker run --rm "$IMAGE" python3 -m worker.vault generate-key)
+          session_secret="ci-$(openssl rand -hex 24)"
+          echo "::add-mask::$demo_password"
+          echo "::add-mask::$vault_key"
+          echo "::add-mask::$session_secret"
+          {
+            echo "DEMO_PASSWORD=$demo_password"
+            echo "VAULT_KEY=$vault_key"
+            echo "SESSION_SECRET=$session_secret"
+          } >> "$GITHUB_ENV"
+      - name: Migrate the database with the image
+        run: docker run --rm --network host -e DATABASE_URL="$CI_DATABASE_URL" "$IMAGE" python3 -m worker.db migrate
+      - name: Seed the demo organizations with the image
+        run: |
+          docker run --rm --network host \
+            -e DATABASE_URL="$CI_DATABASE_URL" \
+            -e BOOTSTRAP_DEMO_PASSWORD="$DEMO_PASSWORD" \
+            "$IMAGE" python3 scripts/bootstrap.py
+      - name: Start the container (multi-user shape, ROLE=all)
+        run: |
+          docker run -d --name ofa-multi --network host \
+            -e ROLE=all \
+            -e PORT=8080 \
+            -e DEPLOY_MODE=1 \
+            -e DATABASE_URL="$CI_DATABASE_URL" \
+            -e VAULT_KEY="$VAULT_KEY" \
+            -e SESSION_SECRET="$SESSION_SECRET" \
+            "$IMAGE" >/dev/null
+          for i in $(seq 1 60); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/readyz)" = "200" ]; then
+              echo "ready after about $((i * 3))s"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "/readyz did not return 200 within 180s"
+          exit 1
+      - name: Check the start-up sequence in the logs
+        run: |
+          docker logs ofa-multi > multi.log 2>&1
+          grep -F "resync: orgs=2, created=2" multi.log
+          grep -F "started (concurrency" multi.log
+      - name: Sign in as the demo owner and call an authenticated endpoint
+        run: |
+          signed_out=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/auth/me)
+          if [ "$signed_out" != "401" ]; then
+            echo "expected 401 without a session, got $signed_out"
+            exit 1
+          fi
+          body=$(python3 -c 'import json, os; print(json.dumps({"email": "owner@acme.test", "password": os.environ["DEMO_PASSWORD"]}))')
+          curl -sS -D login.headers -o login.json -H 'Content-Type: application/json' -d "$body" http://127.0.0.1:8080/api/auth/login
+          head -1 login.headers
+          grep -q ' 200' login.headers
+          # The session cookie is Secure (DEPLOY_MODE), so a cookie jar would not send it over plain http: pass it by hand.
+          cookie=$(awk 'tolower($1) == "set-cookie:" && $2 ~ /^ofa_session=/ { sub(/;.*/, "", $2); print $2; exit }' login.headers)
+          test -n "$cookie"
+          curl -fsS -H "Cookie: $cookie" http://127.0.0.1:8080/api/auth/me | tee me.json
+          echo
+          grep -q 'owner@acme.test' me.json
+          curl -fsS -H "Cookie: $cookie" -o /dev/null http://127.0.0.1:8080/api/runs
+      - name: Container logs on failure (multi-user)
+        if: failure()
+        run: docker logs ofa-multi 2>&1 | tail -150
+      - name: Stop the multi-user container
+        if: always()
+        run: docker rm -f ofa-multi || true

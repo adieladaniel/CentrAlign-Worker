@@ -13,6 +13,7 @@ from worker.agent.state import Step
 from worker.config import Settings
 from worker.llm.base import (
     LLMResponse,
+    MalformedCallError,
     Message,
     ModelUnavailableError,
     QuotaExhaustedError,
@@ -167,6 +168,22 @@ async def test_other_transient_errors_are_left_to_the_resilient_retry():
     with pytest.raises(TransientLLMError):
         await llm.complete([Message("user", "hi")])
     assert clients["a"].calls == 1 and clients["b"].calls == 0
+
+
+async def test_malformed_call_moves_to_the_next_model_without_marking_the_first_unhealthy():
+    llm, clients, sleeps = make_failover({"a": [MalformedCallError()], "b": []})
+    out = await llm.complete([Message("user", "hi")])
+    assert out.text == "from b" and clients["a"].calls == 1 and clients["b"].calls == 1
+    assert llm.health.reason("a") is None and llm.health.reason("b") is None and sleeps == []
+    assert (await llm.complete([Message("user", "again")])).text == "from a"  # the first model is still first in line
+
+
+async def test_malformed_call_from_every_model_is_reraised_for_the_resilient_layer():
+    llm, clients, _ = make_failover({"a": [MalformedCallError("a broke")], "b": [MalformedCallError("b broke")]})
+    with pytest.raises(MalformedCallError, match="a broke"):
+        await llm.complete([Message("user", "hi")])
+    assert clients["a"].calls == 1 and clients["b"].calls == 1
+    assert llm.health.reason("a") is None and llm.health.reason("b") is None
 
 
 async def test_network_error_never_marks_or_skips_a_model():

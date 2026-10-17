@@ -119,6 +119,8 @@ class Guards:
             self._failure_nudged = False
         elif step.error not in NON_FAULT_ERRORS:
             self._failures += 1
+        if step.error == "malformed_call":  # the model's glitch, not a repeated action: only the failure streak counts it
+            return
         self._recent.append((_signature(step), _digest(step.observation)))
 
     def check_limits(self, work_steps: int, total_steps: int) -> GuardEvent | None:

@@ -497,7 +497,7 @@ async def test_the_auditor_reports_only_what_it_sees(sim_url, browser_pool, tmp_
                 task="Enter invoice INI-20502", criteria=criteria, claim=claim, facts_text="(nothing)", ctx=ctx)
         finally:
             await close_browser(ctx)
-    assert verdicts["right"].passed and len(verdicts["right"].checks) == 3
+    assert verdicts["right"].passed and len(verdicts["right"].checks) == 5  # 3 criteria + the 2 mandatory checks
     wrong = verdicts["wrong"]
     assert not wrong.passed and not wrong.inconclusive
     failed = wrong.failed_checks
